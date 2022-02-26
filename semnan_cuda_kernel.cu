@@ -1,12 +1,13 @@
 #include <torch/extension.h>
 #include "device_data.h"
-#include "kernel_setup.h"
+#include "kernel_config.h"
 #include <vector>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <utility>
 
+// A structure for holding a value and its index
 template <typename scalar_t>
 struct indexed_scalar_t {
     int index;
@@ -22,6 +23,7 @@ using child_weight_t = indexed_scalar_t<scalar_t>;
 template <typename scalar_t>
 using neighbour_covariance_t = indexed_scalar_t<scalar_t>;
 
+// A structure for helping chunk arrays, lists, etc.
 class array_chunk {
     private:
     int32_t arr_size;
@@ -56,8 +58,7 @@ __global__ void semnan_cuda_forward_kernel(
     /*
      * Compute covariance at [i, j].
      * This requires to get the Pa(i)×Pa(j) covariance sub-matrix.
-     * Note however the only parent of the nodes previously met (alias nodes) is themselves.
-     * `base` is given to the following methods to check whether the node has already been met.
+     * The only parent of the nodes previously met (alias nodes) is themselves.
      */
     __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_FORWARD];
     const int32_t i = blockIdx.x * blockDim.x + threadIdx.x + layer.base;
@@ -78,13 +79,14 @@ __global__ void semnan_cuda_forward_kernel(
         const int32_t k_max = chunker.chunk_size(shared_round);
         const int32_t shared_base = chunker.chunk_base(shared_round);
 
+        // Store data to shared memory
         for (int32_t k = threadIdx.y; k < k_max; k += blockDim.y) {
             const int32_t i_parent = data.get_parent(i, shared_base + k, layer);
             i_data[k].index = i_parent;
             i_data[k].value = data.get_weight(i_parent, i, layer);
         }
 
-    __syncthreads();
+        __syncthreads();
 
         if (y < layer.get_num_vars() && j <= i && j_num_parents > 0) {
             scalar_t covariance_ij = 0.0;
@@ -100,6 +102,7 @@ __global__ void semnan_cuda_forward_kernel(
                     covariance_ij += lambda_ikl * j_parent_weight;
                 }
 
+                // lambda is computed and stored along with covariance
                 data.set_lambda(j_parent, i, lambda_il + (shared_round > 0 ? data.get_lambda(j_parent, i) : 0.0));
             }
 
@@ -117,7 +120,7 @@ __global__ void semnan_cuda_backward_covariance_kernel(
 ) {
     /*
      * Compute covariance_grad at [i, j].
-     * TODO: The covariance_grad between two latent variables is currently ignored. Correct it.
+     * TODO: A final check is required.
      */
     __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_BACKWARD];
     const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -181,6 +184,10 @@ __global__ void semnan_cuda_backward_weights_kernel(
         SEMNANDeviceData<scalar_t> data,
         SEMNANLayerData layer
 ) {
+    /*
+     * Compute weight_grad at [i, j].
+     * TODO: A final check is required.
+     */
     const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
     const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
     const int32_t i = data.get_layer_var(x, layer);
@@ -205,6 +212,7 @@ std::pair<dim3, dim3> get_blocks_and_threads(const int32_t width, const int32_t 
     return std::make_pair(blocks, threads);
 }
 
+// The forward CUDA function. Calls the cuda forward kernel layer by layer.
 template <typename scalar_t>
 void semnan_cuda_forward(const std::vector<SEMNANLayerData>& layers_vec, SEMNANDeviceData<scalar_t>& data) {
     dim3 threads, blocks;
@@ -216,6 +224,8 @@ void semnan_cuda_forward(const std::vector<SEMNANLayerData>& layers_vec, SEMNAND
     }
 }
 
+// The forward CUDA function. Calls the two cuda backward kernels concurrently layer by layer.
+// These kernels compute the weights gradient and the temporary covariance gradient.
 template <typename scalar_t>
 void semnan_cuda_backward(const std::vector<SEMNANLayerData>& layers_vec, SEMNANDeviceData<scalar_t>& data) {
     dim3 threads, blocks;

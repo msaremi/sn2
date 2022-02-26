@@ -7,6 +7,7 @@
  * A declaration for the cpp compiler and a definition for the nvcc compiler.
  */
 
+// Stores the structural data for a layer in semnan
 class SEMNANLayerData {
     public:
     int32_t idx;
@@ -55,7 +56,9 @@ class SEMNANLayerData {
 #endif
 };
 
-
+// Stores the lambda, weights, covariance matrices along with
+// the weights_grad and the two covariance_grads buffers.
+// It provides a view to get/set elements in the matrices.
 template <typename scalar_t>
 class SEMNANDeviceData {
     private:
