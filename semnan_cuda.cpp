@@ -28,30 +28,32 @@ extern template class SEMNANDeviceData<float>;
 extern template class SEMNANDeviceData<double>;
 
 
-// Class SEMNAN
-class SEMNAN {
-    torch::Tensor structure;   // We keep all the tensors alive for the lifetime of SEMNAN
+// Class SEMNANSolver
+class SEMNANSolver {
+    torch::Tensor structure;                // We keep all the tensors alive for the lifetime of SEMNANSolver
     torch::Tensor lambda;
     torch::Tensor weights;
     torch::Tensor covariance;
     torch::Tensor visible_covariance;
-    torch::Tensor sample_covariance_inv;
-    torch::Tensor parents;
-    torch::Tensor parents_bases;
-    torch::Tensor children;
-    torch::Tensor children_bases;
-    torch::Tensor latent_neighbors;
-    torch::Tensor latent_neighbors_bases;
-    torch::Tensor latent_presence_range;
-    std::vector<SEMNANLayerData> layers_vec;
+    torch::Tensor sample_covariance;
+    torch::Tensor sample_covariance_inv;    // We keep `sample_covariance_inv` and
+    torch::Tensor sample_covariance_logdet; // `sample_covariance_logdet` so that we do not re-compute them.
+    torch::Tensor parents;                  // Information regarding the SEMNAN structure
+    torch::Tensor parents_bases;            // ^
+    torch::Tensor children;                 // ^
+    torch::Tensor children_bases;           // ^
+    torch::Tensor latent_neighbors;         // ^
+    torch::Tensor latent_neighbors_bases;   // ^
+    torch::Tensor latent_presence_range;    // ^
+    std::vector<SEMNANLayerData> layers_vec;// ^
     std::variant<
             std::monostate,
             SEMNANDeviceData<float>,
             SEMNANDeviceData<double>
     > data;
 
-    int32_t visible_size;
-    int32_t latent_size;
+    int32_t visible_size;                   // Number of visible variables (|V|)
+    int32_t latent_size;                    // Number of latent variables (|V| + |L|)
     c10::DeviceIndex cuda_device_number;
     torch::Dtype dtype;
 
@@ -208,7 +210,7 @@ class SEMNAN {
     }
 
     public:
-    SEMNAN(
+    SEMNANSolver(
             torch::Tensor& structure,
             torch::Tensor& parameters,
             torch::Dtype dtype
@@ -246,30 +248,56 @@ class SEMNAN {
     }
 
     public:
-    torch::Tensor kullback_leibler_loss_forward() {
+    torch::Tensor kullback_leibler_proxy_loss() {
         return torch::subtract(
-            torch::trace(torch::mm(sample_covariance_inv, visible_covariance)),
+            torch::trace(torch::mm(get_sample_covariance_inv(), visible_covariance)),
             torch::logdet(visible_covariance)
         );
+    }
+
+    public:
+    torch::Tensor kullback_leibler_loss() {
+        return torch::div(
+            torch::add(
+                torch::subtract(kullback_leibler_proxy_loss(), visible_size),
+                get_sample_covariance_logdet()
+            )
+        , 2.0);
     }
 
     private:
     void kullback_leibler_loss_backward() {
         torch::Tensor& visible_covariance_grad =
                 visible_covariance.mutable_grad()[(this->num_layers() + 1) % 2];
-        visible_covariance_grad.copy_(sample_covariance_inv);
+        visible_covariance_grad.copy_(this->get_sample_covariance_inv());
         visible_covariance_grad.subtract_(torch::inverse(visible_covariance));
     }
 
     public:
-    void set_sample_covariance_inv(
-            torch::Tensor sample_covariance_inv
+    void set_sample_covariance(
+            torch::Tensor sample_covariance
     ) {
-        TORCH_CHECK(sample_covariance_inv.dim() == 2, "`sample_covariance_inv` must be 2-dimensional; it is ", sample_covariance_inv.dim(), "-dimensional.");
-        TORCH_CHECK(sample_covariance_inv.size(0) == sample_covariance_inv.size(1), "`sample_covariance_inv` must be a square matrix.");
-        TORCH_CHECK(sample_covariance_inv.size(0) == visible_size, "`sample_covariance_inv` must be a ", visible_size, "×", visible_size, " matrix.");
+        TORCH_CHECK(sample_covariance.dim() == 2, "`sample_covariance` must be 2-dimensional; it is ", sample_covariance_inv.dim(), "-dimensional.");
+        TORCH_CHECK(sample_covariance.size(0) == sample_covariance.size(1), "`sample_covariance` must be a square matrix.");
+        TORCH_CHECK(sample_covariance.size(0) == visible_size, "`sample_covariance` must be a ", visible_size, "×", visible_size, " matrix.");
 
-        this->sample_covariance_inv = sample_covariance_inv.to(this->weights.options());
+        this->sample_covariance = sample_covariance.to(this->weights.options());
+    }
+
+    private:
+    torch::Tensor& get_sample_covariance_inv() {
+        if (this->sample_covariance_inv.numel() == 0)
+            this->sample_covariance_inv = torch::inverse(this->sample_covariance);
+
+        return this->sample_covariance_inv;
+    }
+
+    private:
+    torch::Tensor& get_sample_covariance_logdet() {
+        if (this->sample_covariance_logdet.numel() == 0)
+            this->sample_covariance_logdet = torch::logdet(this->sample_covariance);
+
+        return this->sample_covariance_logdet;
     }
 
     public:
@@ -313,25 +341,26 @@ class SEMNAN {
 };
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    py::class_<SEMNAN>(m, "SEMNAN")
+    py::class_<SEMNANSolver>(m, "SEMNANSolver")
         .def(py::init([] (
                     torch::Tensor& structure,
                     std::optional<torch::Tensor> parameters,
                     py::object& dtype
             ) {
-                return SEMNAN(
+                return SEMNANSolver(
                     structure,
                     parameters.has_value() ? parameters.value() : torch::Tensor(),
                     torch::python::detail::py_object_to_dtype(dtype)
                 );
             }
         ))
-        .def("get_lambda", &SEMNAN::get_lambda)
-        .def("forward", &SEMNAN::forward)
-        .def("backward", &SEMNAN::backward)
-        .def("get_weights", &SEMNAN::get_weights)
-        .def("get_covariance", &SEMNAN::get_covariance)
-        .def("get_visible_covariance", &SEMNAN::get_visible_covariance)
-        .def("set_sample_covariance_inv", &SEMNAN::set_sample_covariance_inv)
-        .def("kullback_leibler_loss_forward", &SEMNAN::kullback_leibler_loss_forward);
+        .def("get_lambda", &SEMNANSolver::get_lambda)
+        .def("forward", &SEMNANSolver::forward)
+        .def("backward", &SEMNANSolver::backward)
+        .def("get_weights", &SEMNANSolver::get_weights)
+        .def("get_covariance", &SEMNANSolver::get_covariance)
+        .def("get_visible_covariance", &SEMNANSolver::get_visible_covariance)
+        .def("set_sample_covariance", &SEMNANSolver::set_sample_covariance)
+        .def("kullback_leibler_proxy_loss", &SEMNANSolver::kullback_leibler_proxy_loss)
+        .def("kullback_leibler_loss", &SEMNANSolver::kullback_leibler_loss);
 }

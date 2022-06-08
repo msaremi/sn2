@@ -1,5 +1,5 @@
 import torch
-from semnan_cuda import SEMNAN
+from semnan_cuda import SEMNANSolver
 
 cuda_device = torch.device("cuda")
 dtype = torch.double
@@ -19,18 +19,18 @@ struct = torch.tensor([  # Upper-triangular matrix with latent space
         [0, 0, 0, 0],  # visible space
 ], device=cuda_device, dtype=torch.bool)
 
-sample_covar_inv = torch.linalg.pinv(torch.tensor([
+sample_covar = torch.tensor([
         [2,  3,  6,  8],
         [3,  7, 12, 16],
         [6, 12, 23, 30],
         [8, 16, 30, 41],
-], dtype=dtype))
+], dtype=dtype)
 
 params = torch.ones_like(struct, dtype=dtype)
 params += torch.randn_like(struct, dtype=dtype)  # add noise to the ground-truth parameters
 
-semnan = SEMNAN(struct, params, dtype)
-semnan.set_sample_covariance_inv(sample_covar_inv)
+semnan = SEMNANSolver(struct, params, dtype)
+semnan.set_sample_covariance(sample_covar)
 optim = torch.optim.Adamax([semnan.get_weights()], lr=learning_rate)
 semnan.forward()
 print(semnan.get_visible_covariance())
@@ -41,6 +41,6 @@ for i in range(num_iterations):
     optim.step()
 
     if i % (num_iterations / 100) == 0:
-        print(f"iter={i}  \terror={semnan.kullback_leibler_loss_forward().item()}")
+        print(f"iter={i:<10} kullback_leibler_loss={semnan.kullback_leibler_loss().item():5.5}")
 
 print(semnan.get_visible_covariance())
