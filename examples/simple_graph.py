@@ -1,7 +1,7 @@
 import torch
 from semnan_cuda import SEMNANSolver
 
-cuda_device = torch.device("cuda")
+device = torch.device("cuda")  # always CUDA
 dtype = torch.double
 learning_rate = 0.001
 num_iterations = 10000
@@ -17,7 +17,7 @@ struct = torch.tensor([  # Upper-triangular matrix with latent space
         [0, 0, 1, 0],  # visible space
         [0, 0, 0, 1],  # visible space
         [0, 0, 0, 0],  # visible space
-], device=cuda_device, dtype=torch.bool)
+], device=device, dtype=torch.bool)
 
 sample_covar = torch.tensor([
         [2,  3,  6,  8],
@@ -27,13 +27,18 @@ sample_covar = torch.tensor([
 ], dtype=dtype)
 
 params = torch.ones_like(struct, dtype=dtype)
-params += torch.randn_like(struct, dtype=dtype)  # add noise to the ground-truth parameters
+params += torch.empty_like(params).normal_(0, 3)  # add noise to the ground-truth parameters
 
-semnan = SEMNANSolver(struct, params, dtype)
-semnan.set_sample_covariance(sample_covar)
-optim = torch.optim.Adamax([semnan.get_weights()], lr=learning_rate)
-semnan.forward()
-print(semnan.get_visible_covariance())
+semnan = SEMNANSolver(struct,                                   # AMASEM structure
+                      weights=params,                           # initial parameters
+                      dtype=dtype,                              # torch.double or torch.float
+                      loss=SEMNANSolver.LOSS.KULLBACK_LEIBLER   # or SEMNANSolver.LOSS.BHATTACHARYYA
+                      )
+semnan.sample_covariance = sample_covar
+optim = torch.optim.Adamax([semnan.weights], lr=learning_rate)
+
+semnan.forward()                    # create the visible covariance matrix
+print(semnan.visible_covariance_)   # ... and display it
 
 for i in range(num_iterations):
     semnan.forward()
@@ -41,6 +46,10 @@ for i in range(num_iterations):
     optim.step()
 
     if i % (num_iterations / 100) == 0:
-        print(f"iter={i:<10} kullback_leibler_loss={semnan.kullback_leibler_loss().item():5.5}")
+        print(f"iter={i:<10}"
+              f"bhattacharyya_loss={semnan.bhattacharyya_loss().item():<15.5}"
+              f"kullback_leibler_loss={semnan.kullback_leibler_loss().item():<15.5}"
+              f"weights_error={torch.dist(semnan.weights, struct.to(dtype)).item():<15.5}"
+              )
 
-print(semnan.get_visible_covariance())
+print(semnan.visible_covariance_)

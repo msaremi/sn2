@@ -57,6 +57,16 @@ class SEMNANSolver {
     c10::DeviceIndex cuda_device_number;
     torch::Dtype dtype;
 
+    torch::Tensor (SEMNANSolver::*loss_method)(void);
+    torch::Tensor (SEMNANSolver::*loss_proxy_method)(void);
+    void (SEMNANSolver::*loss_backward_method)(torch::Tensor&);
+
+    public:
+    enum LOSS {
+        KULLBACK_LEIBLER = 0,
+        BHATTACHARYYA
+    };
+
     private:
     inline int32_t num_layers() {
         return this->layers_vec.size();
@@ -66,7 +76,8 @@ class SEMNANSolver {
     void init_parameters(
             const torch::Tensor& structure,
             const torch::Tensor& parameters,
-            torch::Dtype dtype
+            torch::Dtype dtype,
+            LOSS loss
     ) {
         this->visible_size = structure.size(1);
         this->latent_size = structure.size(0) - visible_size;
@@ -109,6 +120,21 @@ class SEMNANSolver {
             Slice(this->latent_size, None),
             Slice(None)
         });
+
+        switch (loss) {
+            case LOSS::KULLBACK_LEIBLER:
+                this->loss_method = &SEMNANSolver::kullback_leibler_loss;
+                this->loss_proxy_method = &SEMNANSolver::kullback_leibler_loss_proxy;
+                this->loss_backward_method = &SEMNANSolver::kullback_leibler_loss_backward;
+                break;
+            case LOSS::BHATTACHARYYA:
+                this->loss_method = &SEMNANSolver::bhattacharyya_loss;
+                this->loss_proxy_method = &SEMNANSolver::bhattacharyya_loss_proxy;
+                this->loss_backward_method = &SEMNANSolver::bhattacharyya_loss_backward;
+                break;
+            default:
+                AT_ERROR("Invalid `loss` type.");
+        }
     }
 
     private:
@@ -213,9 +239,10 @@ class SEMNANSolver {
     SEMNANSolver(
             torch::Tensor& structure,
             torch::Tensor& parameters,
-            torch::Dtype dtype
+            torch::Dtype dtype,
+            LOSS loss
     ) {
-        this->init_parameters(structure, parameters, dtype);
+        this->init_parameters(structure, parameters, dtype, loss);
         this->make_structures();
 
         AT_DISPATCH_FLOATING_TYPES(dtype, "SEMNANDeviceData::init", ([&] {
@@ -248,7 +275,22 @@ class SEMNANSolver {
     }
 
     public:
-    torch::Tensor kullback_leibler_proxy_loss() {
+    torch::Tensor loss() {
+        return (this->*loss_method)();
+    }
+
+    public:
+    torch::Tensor loss_proxy() {
+        return (this->*loss_proxy_method)();
+    }
+
+    private:
+    void loss_backward(torch::Tensor& visible_covariance_grad) {
+        (this->*loss_backward_method)(visible_covariance_grad);
+    }
+
+    public:
+    torch::Tensor kullback_leibler_loss_proxy() {
         return torch::subtract(
             torch::trace(torch::mm(get_sample_covariance_inv(), visible_covariance)),
             torch::logdet(visible_covariance)
@@ -259,18 +301,42 @@ class SEMNANSolver {
     torch::Tensor kullback_leibler_loss() {
         return torch::div(
             torch::add(
-                torch::subtract(kullback_leibler_proxy_loss(), visible_size),
+                torch::subtract(kullback_leibler_loss_proxy(), visible_size),
                 get_sample_covariance_logdet()
             )
         , 2.0);
     }
 
     private:
-    void kullback_leibler_loss_backward() {
-        torch::Tensor& visible_covariance_grad =
-                visible_covariance.mutable_grad()[(this->num_layers() + 1) % 2];
+    void kullback_leibler_loss_backward(torch::Tensor& visible_covariance_grad) {
         visible_covariance_grad.copy_(this->get_sample_covariance_inv());
         visible_covariance_grad.subtract_(torch::inverse(visible_covariance));
+    }
+
+    public:
+    torch::Tensor bhattacharyya_loss_proxy() {
+        return torch::div(
+            torch::det(
+                torch::div(torch::add(visible_covariance, sample_covariance), 2.0)
+            ),
+            torch::sqrt(torch::det(visible_covariance))
+        );
+    }
+
+    public:
+    torch::Tensor bhattacharyya_loss() {
+        return torch::div(
+            torch::log(
+                torch::div(bhattacharyya_loss_proxy(), torch::sqrt(torch::det(sample_covariance)))
+            ), 2
+        );
+    }
+
+    private:
+    void bhattacharyya_loss_backward(torch::Tensor& visible_covariance_grad) {
+        visible_covariance_grad.copy_(torch::inverse(torch::add(sample_covariance, visible_covariance)));
+        visible_covariance_grad.subtract_(torch::div(torch::inverse(visible_covariance), 2.0));
+        visible_covariance_grad.transpose_(0, 1);
     }
 
     public:
@@ -282,6 +348,11 @@ class SEMNANSolver {
         TORCH_CHECK(sample_covariance.size(0) == visible_size, "`sample_covariance` must be a ", visible_size, "×", visible_size, " matrix.");
 
         this->sample_covariance = sample_covariance.to(this->weights.options());
+    }
+
+    public:
+    torch::Tensor& get_sample_covariance() {
+       return this->sample_covariance;
     }
 
     private:
@@ -312,7 +383,7 @@ class SEMNANSolver {
     public:
     void backward() {
         AT_DISPATCH_FLOATING_TYPES(dtype, "SEMNANDeviceData::backward", ([&] {
-            kullback_leibler_loss_backward();
+            loss_backward(visible_covariance.mutable_grad()[(this->num_layers() + 1) % 2]);
             semnan_cuda_backward<scalar_t>(
                     this->layers_vec, std::get<SEMNANDeviceData<scalar_t>>(this->data)
             );
@@ -322,6 +393,11 @@ class SEMNANSolver {
     public:
     torch::Tensor& get_weights() {
         return this->weights;
+    }
+
+    public:
+    void set_weights(torch::Tensor& weights) {
+        this->weights.copy_(weights);
     }
 
     public:
@@ -341,26 +417,37 @@ class SEMNANSolver {
 };
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    py::class_<SEMNANSolver>(m, "SEMNANSolver")
-        .def(py::init([] (
-                    torch::Tensor& structure,
-                    std::optional<torch::Tensor> parameters,
-                    py::object& dtype
-            ) {
-                return SEMNANSolver(
-                    structure,
-                    parameters.has_value() ? parameters.value() : torch::Tensor(),
-                    torch::python::detail::py_object_to_dtype(dtype)
-                );
-            }
-        ))
-        .def("get_lambda", &SEMNANSolver::get_lambda)
-        .def("forward", &SEMNANSolver::forward)
-        .def("backward", &SEMNANSolver::backward)
-        .def("get_weights", &SEMNANSolver::get_weights)
-        .def("get_covariance", &SEMNANSolver::get_covariance)
-        .def("get_visible_covariance", &SEMNANSolver::get_visible_covariance)
-        .def("set_sample_covariance", &SEMNANSolver::set_sample_covariance)
-        .def("kullback_leibler_proxy_loss", &SEMNANSolver::kullback_leibler_proxy_loss)
-        .def("kullback_leibler_loss", &SEMNANSolver::kullback_leibler_loss);
+    auto semnan_solver = py::class_<SEMNANSolver>(m, "SEMNANSolver").
+            def(py::init([] (
+                        torch::Tensor& structure,
+                        std::optional<torch::Tensor> parameters,
+                        std::optional<py::object> dtype,
+                        std::optional<SEMNANSolver::LOSS> loss
+                ) {
+                    return SEMNANSolver(
+                        structure,
+                        parameters.has_value() ? parameters.value() : torch::Tensor(),
+                        dtype.has_value() ? torch::python::detail::py_object_to_dtype(dtype.value()) : torch::kFloat,
+                        loss.has_value() ? loss.value() : SEMNANSolver::LOSS::KULLBACK_LEIBLER
+                    );
+                }
+            ), py::arg("structure"), py::arg("weights")=std::nullopt, py::arg("dtype")=std::nullopt, py::arg("loss")=std::nullopt).
+            def("forward", &SEMNANSolver::forward).
+            def("backward", &SEMNANSolver::backward).
+            def_property_readonly("lambda_", &SEMNANSolver::get_lambda).
+            def_property_readonly("covariance_", &SEMNANSolver::get_covariance).
+            def_property_readonly("visible_covariance_", &SEMNANSolver::get_visible_covariance).
+            def_property("weights", &SEMNANSolver::get_weights, &SEMNANSolver::set_weights).
+            def_property("sample_covariance", &SEMNANSolver::get_sample_covariance, &SEMNANSolver::set_sample_covariance).
+            def("loss", &SEMNANSolver::loss).
+            def("loss_proxy", &SEMNANSolver::loss_proxy).
+            def("bhattacharyya_loss", &SEMNANSolver::bhattacharyya_loss).
+            def("bhattacharyya_loss_proxy", &SEMNANSolver::bhattacharyya_loss_proxy).
+            def("kullback_leibler_loss", &SEMNANSolver::kullback_leibler_loss).
+            def("kullback_leibler_loss_proxy", &SEMNANSolver::kullback_leibler_loss_proxy);
+
+    py::enum_<SEMNANSolver::LOSS>(semnan_solver, "LOSS").
+            value("KULLBACK_LEIBLER", SEMNANSolver::LOSS::KULLBACK_LEIBLER).
+            value("BHATTACHARYYA", SEMNANSolver::LOSS::BHATTACHARYYA).
+            export_values();
 }
