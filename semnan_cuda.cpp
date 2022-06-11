@@ -56,6 +56,7 @@ class SEMNANSolver {
     int32_t latent_size;                    // Number of latent variables (|V| + |L|)
     c10::DeviceIndex cuda_device_number;
     torch::Dtype dtype;
+    bool check;
 
     torch::Tensor (SEMNANSolver::*loss_method)(void);
     torch::Tensor (SEMNANSolver::*loss_proxy_method)(void);
@@ -77,12 +78,14 @@ class SEMNANSolver {
             const torch::Tensor& structure,
             const torch::Tensor& parameters,
             torch::Dtype dtype,
-            LOSS loss
+            LOSS loss,
+            bool check
     ) {
         this->visible_size = structure.size(1);
         this->latent_size = structure.size(0) - visible_size;
         this->structure = structure;
         this->dtype = dtype;
+        this->check = check;
         const int32_t total_size = latent_size + visible_size;
 
         TORCH_CHECK(structure.is_cuda(), "`structure` must be a CUDA tensor.");
@@ -91,20 +94,41 @@ class SEMNANSolver {
         TORCH_CHECK(latent_size >= 0, "`structure` must be a vertical-rectangular matrix.");
         TORCH_CHECK(dtype == torch::kFloat || dtype == torch::kDouble, "`dtype` must be either float or double.");
         TORCH_CHECK(parameters.numel() == 0 || parameters.sizes() == structure.sizes(), "`parameters` must have the same size as `structure`.");
+        TORCH_CHECK(loss >= LOSS::KULLBACK_LEIBLER && loss <= LOSS::BHATTACHARYYA, "Invalid `loss` type.");
+
+        if (check) {
+            auto latent_structure = structure.index({Slice(None, this->latent_size), Slice()});
+            auto visible_structure = structure.index({Slice(this->latent_size, None), Slice()});
+
+            TORCH_CHECK(
+                latent_structure.any(0).all(0).item<bool>(),
+                "All visible variables must be connected to at least one latent variable."
+            );
+
+            TORCH_CHECK(
+                !torch::tril(visible_structure).any().item<bool>(),
+                "Visible space must be an upper-triangular matrix."
+            );
+
+            TORCH_CHECK(
+                !latent_structure.any(1).logical_not().any(0).item<bool>(),
+                "There are loose variables in the latent space."
+            );
+        }
 
         const bool parameters_exist = parameters.numel() > 0;
         const auto& base = parameters_exist ? parameters : structure;
 
         this->cuda_device_number = base.device().is_cuda() ? base.device().index() : -1;
         torch::TensorOptions options = torch::TensorOptions()
-                                       .dtype(dtype)
-                                       .device(torch::kCUDA, this->cuda_device_number)
-                                       .requires_grad(false);
+                                              .dtype(dtype)
+                                              .device(torch::kCUDA, this->cuda_device_number)
+                                              .requires_grad(false);
 
         this->weights = base.to(options);
         this->weights *= parameters_exist ?
-                         this->structure :
-                         torch::randn_like(this->weights, options);
+                             this->structure :
+                             torch::randn_like(this->weights, options);
 
         this->covariance = torch::zeros_like(this->weights, options);
         this->lambda = torch::zeros_like(this->weights, options);
@@ -132,8 +156,6 @@ class SEMNANSolver {
                 this->loss_proxy_method = &SEMNANSolver::bhattacharyya_loss_proxy;
                 this->loss_backward_method = &SEMNANSolver::bhattacharyya_loss_backward;
                 break;
-            default:
-                AT_ERROR("Invalid `loss` type.");
         }
     }
 
@@ -141,9 +163,9 @@ class SEMNANSolver {
     void make_structures() {
         const int32_t total_size = latent_size + visible_size;
         torch::TensorOptions options = torch::TensorOptions()
-                                       .dtype(torch::kInt32)
-                                       .device(torch::kCUDA, this->cuda_device_number)
-                                       .requires_grad(false);
+                                              .dtype(torch::kInt32)
+                                              .device(torch::kCUDA, this->cuda_device_number)
+                                              .requires_grad(false);
 
         int32_t edge_count = 0, rev_edge_count = 0;
         std::vector<std::vector<int32_t>> parents_vec(this->visible_size);
@@ -152,7 +174,7 @@ class SEMNANSolver {
         this->layers_vec.resize(1);
         this->layers_vec.push_back(SEMNANLayerData(1, 0));
 
-        for (int32_t c = 0, layer_max = -1; c < visible_size; c++) {
+        for (int32_t c = 0, layer_max = 0; c < visible_size; c++) {
             for (int32_t p = -latent_size; p < visible_size; p++)
                 if (structure[p + latent_size][c].item<bool>()) {
                     parents_vec[c].push_back(p); // Add to the parents of the current child
@@ -238,11 +260,12 @@ class SEMNANSolver {
     public:
     SEMNANSolver(
             torch::Tensor& structure,
-            torch::Tensor& parameters,
-            torch::Dtype dtype,
-            LOSS loss
+            torch::Tensor& parameters = torch::Tensor(),
+            torch::Dtype dtype = torch::kFloat,
+            LOSS loss = SEMNANSolver::LOSS::KULLBACK_LEIBLER,
+            bool check = true
     ) {
-        this->init_parameters(structure, parameters, dtype, loss);
+        this->init_parameters(structure, parameters, dtype, loss, check);
         this->make_structures();
 
         AT_DISPATCH_FLOATING_TYPES(dtype, "SEMNANDeviceData::init", ([&] {
@@ -422,16 +445,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                         torch::Tensor& structure,
                         std::optional<torch::Tensor> parameters,
                         std::optional<py::object> dtype,
-                        std::optional<SEMNANSolver::LOSS> loss
+                        std::optional<SEMNANSolver::LOSS> loss,
+                        std::optional<bool> check
                 ) {
                     return SEMNANSolver(
                         structure,
                         parameters.has_value() ? parameters.value() : torch::Tensor(),
                         dtype.has_value() ? torch::python::detail::py_object_to_dtype(dtype.value()) : torch::kFloat,
-                        loss.has_value() ? loss.value() : SEMNANSolver::LOSS::KULLBACK_LEIBLER
+                        loss.has_value() ? loss.value() : SEMNANSolver::LOSS::KULLBACK_LEIBLER,
+                        check.has_value() ? check.value() : true
                     );
                 }
-            ), py::arg("structure"), py::arg("weights")=std::nullopt, py::arg("dtype")=std::nullopt, py::arg("loss")=std::nullopt).
+            ), py::arg("structure"), py::arg("weights")=std::nullopt, py::arg("dtype")=std::nullopt,
+                    py::arg("loss")=std::nullopt, py::arg("check")=std::nullopt).
             def("forward", &SEMNANSolver::forward).
             def("backward", &SEMNANSolver::backward).
             def_property_readonly("lambda_", &SEMNANSolver::get_lambda).
