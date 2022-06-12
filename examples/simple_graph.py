@@ -32,7 +32,7 @@ params += torch.empty_like(params).normal_(0, 3)  # add noise to the ground-trut
 semnan = SEMNANSolver(struct,                                   # AMASEM structure
                       weights=params,                           # initial parameters
                       dtype=dtype,                              # torch.double or torch.float
-                      loss=SEMNANSolver.LOSS.KULLBACK_LEIBLER   # or SEMNANSolver.LOSS.BHATTACHARYYA
+                      loss=SEMNANSolver.LOSS.KULLBACK_LEIBLER   # or .BHATTACHARYYA or a subclass of SEMNANSolverLoss
                       )
 semnan.sample_covariance = sample_covar
 optim = torch.optim.Adamax([semnan.weights], lr=learning_rate)

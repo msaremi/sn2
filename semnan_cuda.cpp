@@ -28,6 +28,22 @@ extern template class SEMNANDeviceData<float>;
 extern template class SEMNANDeviceData<double>;
 
 
+// Custom loss method
+class SEMNANSolverLoss {
+    public:
+    virtual torch::Tensor loss_proxy(const torch::Tensor& sample_covariance, const torch::Tensor& visible_covariance) const = 0;
+
+    public:
+    virtual torch::Tensor loss(const torch::Tensor& sample_covariance, const torch::Tensor& visible_covariance) const = 0;
+
+    public:
+    virtual torch::Tensor loss_backward(const torch::Tensor& sample_covariance, const torch::Tensor& visible_covariance) const = 0;
+
+    public:
+    virtual ~SEMNANSolverLoss() {}
+};
+
+
 // Class SEMNANSolver
 class SEMNANSolver {
     torch::Tensor structure;                // We keep all the tensors alive for the lifetime of SEMNANSolver
@@ -61,6 +77,7 @@ class SEMNANSolver {
     torch::Tensor (SEMNANSolver::*loss_method)(void);
     torch::Tensor (SEMNANSolver::*loss_proxy_method)(void);
     void (SEMNANSolver::*loss_backward_method)(torch::Tensor&);
+    std::shared_ptr<SEMNANSolverLoss> loss_function;
 
     public:
     enum LOSS {
@@ -79,6 +96,7 @@ class SEMNANSolver {
             const torch::Tensor& parameters,
             torch::Dtype dtype,
             LOSS loss,
+            std::shared_ptr<SEMNANSolverLoss> loss_function,
             bool check
     ) {
         this->visible_size = structure.size(1);
@@ -110,13 +128,11 @@ class SEMNANSolver {
                 "Visible space must be an upper-triangular matrix."
             );
 
-            TORCH_CHECK(
-                !latent_structure.any(1).logical_not().any(0).item<bool>(),
-                "There are loose variables in the latent space."
-            );
+            if (latent_structure.any(1).logical_not().any(0).item<bool>())
+                TORCH_WARN_ONCE("There are loose variables in the latent space.");
         }
 
-        const bool parameters_exist = parameters.numel() > 0;
+        const bool parameters_exist = parameters.defined();
         const auto& base = parameters_exist ? parameters : structure;
 
         this->cuda_device_number = base.device().is_cuda() ? base.device().index() : -1;
@@ -145,18 +161,21 @@ class SEMNANSolver {
             Slice(None)
         });
 
-        switch (loss) {
-            case LOSS::KULLBACK_LEIBLER:
-                this->loss_method = &SEMNANSolver::kullback_leibler_loss;
-                this->loss_proxy_method = &SEMNANSolver::kullback_leibler_loss_proxy;
-                this->loss_backward_method = &SEMNANSolver::kullback_leibler_loss_backward;
-                break;
-            case LOSS::BHATTACHARYYA:
-                this->loss_method = &SEMNANSolver::bhattacharyya_loss;
-                this->loss_proxy_method = &SEMNANSolver::bhattacharyya_loss_proxy;
-                this->loss_backward_method = &SEMNANSolver::bhattacharyya_loss_backward;
-                break;
-        }
+        if (loss_function)
+            this->loss_function = loss_function;
+        else
+            switch (loss) {
+                case LOSS::KULLBACK_LEIBLER:
+                    this->loss_method = &SEMNANSolver::kullback_leibler_loss;
+                    this->loss_proxy_method = &SEMNANSolver::kullback_leibler_loss_proxy;
+                    this->loss_backward_method = &SEMNANSolver::kullback_leibler_loss_backward;
+                    break;
+                case LOSS::BHATTACHARYYA:
+                    this->loss_method = &SEMNANSolver::bhattacharyya_loss;
+                    this->loss_proxy_method = &SEMNANSolver::bhattacharyya_loss_proxy;
+                    this->loss_backward_method = &SEMNANSolver::bhattacharyya_loss_backward;
+                    break;
+            }
     }
 
     private:
@@ -238,7 +257,8 @@ class SEMNANSolver {
         for (int32_t v = -this->latent_size; v < 0; v++) {
             auto& this_latent = this->latent_presence_range[v + latent_size];
 
-            for (int32_t l = this_latent[0].item<int32_t>(); l <= this_latent[1].item<int32_t>(); l++) {
+            // `l >= 0` takes care of "loose" latent variables (those with no children)
+            for (int32_t l = this_latent[0].item<int32_t>(); l <= this_latent[1].item<int32_t>() && l >= 0; l++) {
                 latent_neighbors_vec[l].push_back(v);
                 latent_neighbors_count++;
             }
@@ -263,9 +283,10 @@ class SEMNANSolver {
             torch::Tensor& parameters = torch::Tensor(),
             torch::Dtype dtype = torch::kFloat,
             LOSS loss = SEMNANSolver::LOSS::KULLBACK_LEIBLER,
+            std::shared_ptr<SEMNANSolverLoss> loss_function = nullptr,
             bool check = true
     ) {
-        this->init_parameters(structure, parameters, dtype, loss, check);
+        this->init_parameters(structure, parameters, dtype, loss, loss_function, check);
         this->make_structures();
 
         AT_DISPATCH_FLOATING_TYPES(dtype, "SEMNANDeviceData::init", ([&] {
@@ -299,17 +320,24 @@ class SEMNANSolver {
 
     public:
     torch::Tensor loss() {
-        return (this->*loss_method)();
+        return loss_function ?
+                    loss_function->loss(sample_covariance, visible_covariance) :
+                    (this->*loss_method)();
     }
 
     public:
     torch::Tensor loss_proxy() {
-        return (this->*loss_proxy_method)();
+        return loss_function ?
+                    loss_function->loss_proxy(sample_covariance, visible_covariance) :
+                    (this->*loss_proxy_method)();
     }
 
     private:
     void loss_backward(torch::Tensor& visible_covariance_grad) {
-        (this->*loss_backward_method)(visible_covariance_grad);
+        if (loss_function)
+            visible_covariance_grad.copy_(loss_function->loss_backward(sample_covariance, visible_covariance));
+        else
+            (this->*loss_backward_method)(visible_covariance_grad);
     }
 
     public:
@@ -439,20 +467,43 @@ class SEMNANSolver {
     }
 };
 
+
+// Bind abstract class to python
+class PySEMNANSolverLoss : public SEMNANSolverLoss {
+    public:
+    virtual torch::Tensor loss_proxy(const torch::Tensor& sample_covariance, const torch::Tensor& visible_covariance) const override {
+        PYBIND11_OVERLOAD_PURE(torch::Tensor, SEMNANSolverLoss, loss_proxy, sample_covariance, visible_covariance);
+    }
+
+    public:
+    virtual torch::Tensor loss(const torch::Tensor& sample_covariance, const torch::Tensor& visible_covariance) const override {
+        PYBIND11_OVERLOAD_PURE(torch::Tensor, SEMNANSolverLoss, loss, sample_covariance, visible_covariance);
+    }
+
+    public:
+    virtual torch::Tensor loss_backward(const torch::Tensor& sample_covariance, const torch::Tensor& visible_covariance) const override {
+        PYBIND11_OVERLOAD_PURE(torch::Tensor, SEMNANSolverLoss, loss_backward, sample_covariance, visible_covariance);
+    }
+};
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     auto semnan_solver = py::class_<SEMNANSolver>(m, "SEMNANSolver").
             def(py::init([] (
                         torch::Tensor& structure,
                         std::optional<torch::Tensor> parameters,
                         std::optional<py::object> dtype,
-                        std::optional<SEMNANSolver::LOSS> loss,
+                        std::optional<std::variant<SEMNANSolver::LOSS, std::shared_ptr<SEMNANSolverLoss>>> loss,
                         std::optional<bool> check
                 ) {
                     return SEMNANSolver(
                         structure,
                         parameters.has_value() ? parameters.value() : torch::Tensor(),
                         dtype.has_value() ? torch::python::detail::py_object_to_dtype(dtype.value()) : torch::kFloat,
-                        loss.has_value() ? loss.value() : SEMNANSolver::LOSS::KULLBACK_LEIBLER,
+                        loss.has_value() && std::holds_alternative<SEMNANSolver::LOSS>(loss.value()) ?
+                                std::get<SEMNANSolver::LOSS>(loss.value()) : SEMNANSolver::LOSS::KULLBACK_LEIBLER,
+                        loss.has_value() && std::holds_alternative<std::shared_ptr<SEMNANSolverLoss>>(loss.value()) ?
+                                std::get<std::shared_ptr<SEMNANSolverLoss>>(loss.value()) : nullptr,
                         check.has_value() ? check.value() : true
                     );
                 }
@@ -476,4 +527,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             value("KULLBACK_LEIBLER", SEMNANSolver::LOSS::KULLBACK_LEIBLER).
             value("BHATTACHARYYA", SEMNANSolver::LOSS::BHATTACHARYYA).
             export_values();
+
+    py::class_<SEMNANSolverLoss, PySEMNANSolverLoss, std::shared_ptr<SEMNANSolverLoss>>(m, "SEMNANSolverLoss").
+            def(py::init<>()).
+            def("loss_proxy", &SEMNANSolverLoss::loss_proxy, py::arg("sample_covariance"), py::arg("visible_covariance")).
+            def("loss", &SEMNANSolverLoss::loss, py::arg("sample_covariance"), py::arg("visible_covariance")).
+            def("loss_backward", &SEMNANSolverLoss::loss_backward, py::arg("sample_covariance"), py::arg("visible_covariance"));
 }
