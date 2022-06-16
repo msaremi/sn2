@@ -68,6 +68,7 @@ class SEMNANDeviceData {
     scalar_t* covariance;
     scalar_t* weights_grad;
     scalar_t* covariance_grads[2];
+    scalar_t* lv_transformation;
     const int32_t* parents;
     const int32_t* parents_bases;
     const int32_t* children;
@@ -81,40 +82,18 @@ class SEMNANDeviceData {
 
 #ifdef __CUDACC__
     public:
-    SEMNANDeviceData(
-            const bool* const structure,
-            scalar_t* const lambda,
-            scalar_t* const weights,
-            scalar_t* const covariance,
-            scalar_t* const weights_grad,
-            scalar_t* const covariance_grads[2],
-            const int32_t* const parents,
-            const int32_t* const parents_bases,
-            const int32_t* const children,
-            const int32_t* const children_bases,
-            const int32_t* const lat_neighbors,
-            const int32_t* const lat_neighbors_bases,
-            const int32_t* const lat_range,
-            const int32_t vis_len,
-            const int32_t lat_len,
-            const int32_t num_layers
-    ):  structure(structure),
-        lambda(lambda),
-        weights(weights),
-        covariance(covariance),
-        weights_grad(weights_grad),
-        covariance_grads{covariance_grads[0], covariance_grads[1]},
-        parents(parents),
-        parents_bases(parents_bases),
-        children(children),
-        children_bases(children_bases),
-        lat_neighbors(lat_neighbors),
-        lat_neighbors_bases(lat_neighbors_bases),
-        lat_range(lat_range),
-        vis_len(vis_len),
-        lat_len(lat_len),
-        num_layers(num_layers)
-    { }
+    __device__ __forceinline__ scalar_t get_lv_transformation(int32_t a, int32_t d) const {
+        if (a == d)
+            return 1.0;
+        else
+            return (a < d) ? lv_transformation[(a + lat_len) * vis_len + d] : 0.0;
+    }
+
+    public:
+    __device__ __forceinline__ void set_lv_transformation(int32_t a, int32_t d, scalar_t val) {
+        if (a <= d)
+            lv_transformation[(a + lat_len) * vis_len + d] = val;
+    }
 
     public:
     __device__ __forceinline__ scalar_t get_weight(int32_t p, int32_t c, const SEMNANLayerData& layer) const {
@@ -255,6 +234,7 @@ class SEMNANDeviceData {
             scalar_t* const covariance,
             scalar_t* const weights_grad,
             scalar_t* const covariance_grads[2],
+            scalar_t* const lv_transformation,
             const int32_t* const parents,
             const int32_t* const parents_bases,
             const int32_t* const children,
@@ -265,7 +245,27 @@ class SEMNANDeviceData {
             const int32_t vis_len,
             const int32_t lat_len,
             const int32_t num_layers
-    );
+    ):  structure(structure),
+        lambda(lambda),
+        weights(weights),
+        covariance(covariance),
+        weights_grad(weights_grad),
+        covariance_grads{covariance_grads[0], covariance_grads[1]},
+        lv_transformation(lv_transformation),
+        parents(parents),
+        parents_bases(parents_bases),
+        children(children),
+        children_bases(children_bases),
+        lat_neighbors(lat_neighbors),
+        lat_neighbors_bases(lat_neighbors_bases),
+        lat_range(lat_range),
+        vis_len(vis_len),
+        lat_len(lat_len),
+        num_layers(num_layers)
+    { }
+
+    void set_lv_transformation(scalar_t* const value) { lv_transformation = value; }
+    scalar_t* get_lv_transformation() const { return lv_transformation; }
 #endif
 };
 

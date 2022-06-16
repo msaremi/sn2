@@ -1,5 +1,5 @@
 import torch
-from semnan_cuda import SEMNANSolver
+from semnan_cuda import SEMNANSolver, loss
 
 device = torch.device("cuda")  # always CUDA
 dtype = torch.double
@@ -29,10 +29,10 @@ sample_covar = torch.tensor([
 params = torch.ones_like(struct, dtype=dtype)
 params += torch.empty_like(params).normal_(0, 3)  # add noise to the ground-truth parameters
 
-semnan = SEMNANSolver(struct,                                   # AMASEM structure
-                      weights=params,                           # initial parameters
-                      dtype=dtype,                              # torch.double or torch.float
-                      loss=SEMNANSolver.LOSS.KULLBACK_LEIBLER   # or .BHATTACHARYYA or a subclass of SEMNANSolverLoss
+semnan = SEMNANSolver(struct,                               # AMASEM structure
+                      weights=params,                       # initial parameters
+                      dtype=dtype,                          # torch.double or torch.float
+                      loss=loss.KullbackLeibler()           # or .Bhattacharyya or a subclass of .LossBase
                       )
 semnan.sample_covariance = sample_covar
 optim = torch.optim.Adamax([semnan.weights], lr=learning_rate)
@@ -47,8 +47,7 @@ for i in range(num_iterations):
 
     if i % (num_iterations / 100) == 0:
         print(f"iter={i:<10}"
-              f"bhattacharyya_loss={semnan.bhattacharyya_loss().item():<15.5}"
-              f"kullback_leibler_loss={semnan.kullback_leibler_loss().item():<15.5}"
+              f"kullback_leibler_loss={semnan.loss().item():<15.5}"
               f"weights_error={torch.dist(semnan.weights, struct.to(dtype)).item():<15.5}"
               )
 

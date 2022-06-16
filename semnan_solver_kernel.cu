@@ -114,6 +114,28 @@ __global__ void semnan_cuda_forward_kernel(
 }
 
 template <typename scalar_t>
+__global__ void semnan_cuda_lv_transformation_kernel(
+        SEMNANDeviceData<scalar_t> data,
+        SEMNANLayerData layer
+) {
+    const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (y < data.get_lat_len()) {
+        const int32_t i = blockIdx.x * blockDim.x + threadIdx.x + layer.base;
+        const int32_t j = y - data.get_lat_len();
+        const int32_t i_num_parents = data.get_num_parents(i, layer);
+        scalar_t lv_trans_ji = 0.0;
+
+        for (int32_t k = 0; k < i_num_parents; k++) {
+            const int32_t i_parent = data.get_parent(i, k, layer);
+            lv_trans_ji += data.get_lv_transformation(j, i_parent) * data.get_weight(i_parent, i, layer);
+        }
+
+        data.set_lv_transformation(j, i, lv_trans_ji);
+    }
+}
+
+template <typename scalar_t>
 __global__ void semnan_cuda_backward_covariance_kernel(
         SEMNANDeviceData<scalar_t> data,
         SEMNANLayerData layer
@@ -252,6 +274,17 @@ void semnan_cuda_backward(const std::vector<SEMNANLayerData>& layers_vec, SEMNAN
 }
 
 
+template <typename scalar_t>
+void semnan_cuda_lv_transformation(const std::vector<SEMNANLayerData>& layers_vec, SEMNANDeviceData<scalar_t>& data) {
+    dim3 threads, blocks;
+
+    for (int32_t l = 1; l < layers_vec.size(); l++) {
+        const auto& layer = layers_vec[l];
+        std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_new_vars(), data.get_lat_len());
+        semnan_cuda_lv_transformation_kernel<scalar_t><<<blocks, threads>>>(data, layer);
+    }
+}
+
 // ==============
 // Concrete types
 template class SEMNANDeviceData<float>;
@@ -262,3 +295,6 @@ template void semnan_cuda_forward<double>(const std::vector<SEMNANLayerData>&, S
 
 template void semnan_cuda_backward<float>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<float>&);
 template void semnan_cuda_backward<double>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<double>&);
+
+template void semnan_cuda_lv_transformation<float>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<float>&);
+template void semnan_cuda_lv_transformation<double>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<double>&);

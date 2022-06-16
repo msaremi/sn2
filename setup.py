@@ -6,7 +6,7 @@ setup(
     ext_modules=[
         CUDAExtension('semnan_cuda', [
             'semnan_cuda.cpp',
-            'semnan_cuda_kernel.cu',
+            'semnan_solver_kernel.cu',
         ], extra_compile_args={'cxx': ['/std:c++17']})
     ],
     cmdclass={
