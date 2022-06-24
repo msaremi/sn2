@@ -7,294 +7,444 @@
 #include <stdio.h>
 #include <utility>
 
-// A structure for holding a value and its index
-template <typename scalar_t>
-struct indexed_scalar_t {
-    int index;
-    scalar_t value;
-};
+namespace semnan_cuda {
+    // A structure for holding a value and its index
+    template <typename scalar_t>
+    struct indexed_scalar_t {
+        int index;
+        scalar_t value;
+    };
 
-template <typename scalar_t>
-using parent_weight_t = indexed_scalar_t<scalar_t>;
+    template <typename scalar_t>
+    using parent_weight_t = indexed_scalar_t<scalar_t>;
 
-template <typename scalar_t>
-using child_weight_t = indexed_scalar_t<scalar_t>;
+    template <typename scalar_t>
+    using child_weight_t = indexed_scalar_t<scalar_t>;
 
-template <typename scalar_t>
-using neighbour_covariance_t = indexed_scalar_t<scalar_t>;
+    template <typename scalar_t>
+    using neighbour_covariance_t = indexed_scalar_t<scalar_t>;
 
-// A structure for helping chunk arrays, lists, etc.
-class array_chunk {
-    private:
-    int32_t arr_size;
-    int32_t chnk_size;
+    // A structure for helping chunk arrays, lists, etc.
+    class array_chunk {
+        private:
+        int32_t arr_size;
+        int32_t chnk_size;
 
-    public:
-    __device__ __forceinline__ array_chunk(const int32_t arr_size, const int32_t chnk_size) :
-            arr_size(arr_size), chnk_size(chnk_size) { }
+        public:
+        __device__ __forceinline__ array_chunk(const int32_t arr_size, const int32_t chnk_size) :
+                arr_size(arr_size), chnk_size(chnk_size) { }
 
-    public:
-    __device__ __forceinline__ int32_t chunk_size(const int32_t chnk_idx) const {
-        int32_t size = arr_size - chnk_idx * chnk_size;
-        return (size <= chnk_size) ? size : chnk_size;
-    }
-
-    public:
-    __device__ __forceinline__ int32_t chunk_base(const int32_t chnk_idx) const {
-        return chnk_idx * chnk_size;
-    }
-
-    public:
-    __device__ __forceinline__ int32_t num_chunks() const {
-        return (arr_size + chnk_size - 1) / chnk_size;
-    }
-};
-
-template <typename scalar_t>
-__global__ void semnan_cuda_forward_kernel(
-        SEMNANDeviceData<scalar_t> data,
-        SEMNANLayerData layer
-) {
-    /*
-     * Compute covariance at [i, j].
-     * This requires to get the Pa(i)×Pa(j) covariance sub-matrix.
-     * The only parent of the nodes previously met (alias nodes) is themselves.
-     */
-    __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_FORWARD];
-    const int32_t i = blockIdx.x * blockDim.x + threadIdx.x + layer.base;
-    const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int32_t i_num_parents = data.get_num_parents(i, layer);
-    int32_t j, j_num_parents;
-
-    if (y < layer.get_num_vars()) {
-        j = data.get_layer_var(y, layer);
-        j_num_parents = data.get_num_parents(j, layer);
-    }
-
-    auto i_data = reinterpret_cast<parent_weight_t<scalar_t> *>(shared_memory);
-    const int32_t shared_size = SHARED_MEMORY_SIZE_FORWARD / sizeof(parent_weight_t<scalar_t>);
-    const array_chunk chunker(i_num_parents, shared_size);
-
-    for (int32_t shared_round = 0; shared_round < chunker.num_chunks(); shared_round++) {
-        const int32_t k_max = chunker.chunk_size(shared_round);
-        const int32_t shared_base = chunker.chunk_base(shared_round);
-
-        // Store data to shared memory
-        for (int32_t k = threadIdx.y; k < k_max; k += blockDim.y) {
-            const int32_t i_parent = data.get_parent(i, shared_base + k, layer);
-            i_data[k].index = i_parent;
-            i_data[k].value = data.get_weight(i_parent, i, layer);
+        public:
+        __device__ __forceinline__ int32_t chunk_size(const int32_t chnk_idx) const {
+            int32_t size = arr_size - chnk_idx * chnk_size;
+            return (size <= chnk_size) ? size : chnk_size;
         }
 
-        __syncthreads();
+        public:
+        __device__ __forceinline__ int32_t chunk_base(const int32_t chnk_idx) const {
+            return chnk_idx * chnk_size;
+        }
 
-        if (y < layer.get_num_vars() && j <= i && j_num_parents > 0) {
-            scalar_t covariance_ij = 0.0;
+        public:
+        __device__ __forceinline__ int32_t num_chunks() const {
+            return (arr_size + chnk_size - 1) / chnk_size;
+        }
+    };
 
-            for (int32_t l = 0; l < j_num_parents; l++) {
-                const int32_t j_parent = data.get_parent(j, l, layer);
-                const scalar_t j_parent_weight = data.get_weight(j_parent, j, layer);
-                scalar_t lambda_il = 0.0;
 
-                for (int32_t k = 0; k < k_max; k++) {
-                    const scalar_t lambda_ikl = i_data[k].value * data.get_covariance(i_data[k].index, j_parent);
-                    lambda_il += lambda_ikl;
-                    covariance_ij += lambda_ikl * j_parent_weight;
-                }
+    std::pair<dim3, dim3> get_blocks_and_threads(const int32_t width, const int32_t height) {
+        const dim3 threads(1, min(height, THREADS_PER_BLOCK));
+        const dim3 blocks(width, (height + threads.y - 1) / threads.y);
+        return std::make_pair(blocks, threads);
+    }
 
-                // lambda is computed and stored along with covariance
-                data.set_lambda(j_parent, i, lambda_il + (shared_round > 0 ? data.get_lambda(j_parent, i) : 0.0));
+    namespace covar {
+        template <typename scalar_t>
+        __global__ void forward_kernel(
+                DeviceData<scalar_t> data,
+                LayerData layer
+        ) {
+            /*
+             * Compute covariance at [i, j].
+             * This requires to get the Pa(i)×Pa(j) covariance sub-matrix.
+             * The only parent of the nodes previously met (alias nodes) is themselves.
+             */
+            __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_FORWARD];
+            const int32_t i = blockIdx.x * blockDim.x + threadIdx.x + layer.base;
+            const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+            const int32_t i_num_parents = data.get_num_parents(i, layer);
+            int32_t j, j_num_parents;
+
+            if (y < layer.get_num_vars()) {
+                j = data.get_layer_var(y, layer);
+                j_num_parents = data.get_num_parents(j, layer);
             }
 
-            data.set_covariance(i, j, covariance_ij + (shared_round > 0 ? data.get_covariance(i, j) : 0.0));
-        }
+            auto i_data = reinterpret_cast<parent_weight_t<scalar_t> *>(shared_memory);
+            const int32_t shared_size = SHARED_MEMORY_SIZE_FORWARD / sizeof(parent_weight_t<scalar_t>);
+            const array_chunk chunker(i_num_parents, shared_size);
 
-        __syncthreads();
-    }
-}
+            for (int32_t shared_round = 0; shared_round < chunker.num_chunks(); shared_round++) {
+                const int32_t k_max = chunker.chunk_size(shared_round);
+                const int32_t shared_base = chunker.chunk_base(shared_round);
 
-template <typename scalar_t>
-__global__ void semnan_cuda_lv_transformation_kernel(
-        SEMNANDeviceData<scalar_t> data,
-        SEMNANLayerData layer
-) {
-    const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (y < data.get_lat_len()) {
-        const int32_t i = blockIdx.x * blockDim.x + threadIdx.x + layer.base;
-        const int32_t j = y - data.get_lat_len();
-        const int32_t i_num_parents = data.get_num_parents(i, layer);
-        scalar_t lv_trans_ji = 0.0;
-
-        for (int32_t k = 0; k < i_num_parents; k++) {
-            const int32_t i_parent = data.get_parent(i, k, layer);
-            lv_trans_ji += data.get_lv_transformation(j, i_parent) * data.get_weight(i_parent, i, layer);
-        }
-
-        data.set_lv_transformation(j, i, lv_trans_ji);
-    }
-}
-
-template <typename scalar_t>
-__global__ void semnan_cuda_backward_covariance_kernel(
-        SEMNANDeviceData<scalar_t> data,
-        SEMNANLayerData layer
-) {
-    /*
-     * Compute covariance_grad at [i, j].
-     * TODO: A final check is required.
-     */
-    __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_BACKWARD];
-    const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int32_t i = data.get_layer_var(x, layer);
-    int32_t i_begin, i_end;
-    data.get_children_range(i, i_begin, i_end, layer);
-    const int32_t i_num_children = i_end - i_begin;
-    int32_t j, j_begin, j_end, j_num_children;
-
-    if (y < layer.get_num_vars()) {
-        j = data.get_layer_var(y, layer);
-        data.get_children_range(j, j_begin, j_end, layer);
-        j_num_children = j_end - j_begin;
-    }
-
-    auto i_data = reinterpret_cast<child_weight_t<scalar_t> *>(shared_memory);
-    const int32_t shared_size = SHARED_MEMORY_SIZE_BACKWARD / sizeof(child_weight_t<scalar_t>);
-    const array_chunk chunker(i_num_children, shared_size);
-
-    for (int32_t shared_round = 0; shared_round < chunker.num_chunks(); shared_round++) {
-        const int32_t k_max = chunker.chunk_size(shared_round);
-        const int32_t shared_base = chunker.chunk_base(shared_round);
-
-        for (int32_t k = threadIdx.y; k < k_max; k += blockDim.y) {
-            const int32_t i_child = data.get_child(i, i_begin + shared_base + k, layer);
-            i_data[k].index = i_child;
-            i_data[k].value = data.get_weight(i, i_child, layer);
-        }
-
-        __syncthreads();
-
-        if (y < layer.get_num_vars() && j <= i && j_num_children > 0) {
-            scalar_t covariance_grad_ij = 0.0;
-
-            for (int32_t l = 0; l < j_num_children; l++) {
-                const int32_t j_child = data.get_child(j, j_begin + l, layer);
-                const scalar_t j_child_weight = data.get_weight(j, j_child, layer);
-
-                for (int32_t k = 0; k < k_max; k++) {
-                    covariance_grad_ij += i_data[k].value
-                                        * data.get_covariance_grad(i_data[k].index, j_child, (layer.idx + 1) % 2)
-                                        * j_child_weight;
+                // Store data to shared memory
+                for (int32_t k = threadIdx.y; k < k_max; k += blockDim.y) {
+                    const int32_t i_parent = data.get_parent(i, shared_base + k, layer);
+                    i_data[k].index = i_parent;
+                    i_data[k].value = data.get_weight(i_parent, i, layer);
                 }
+
+                __syncthreads();
+
+                if (y < layer.get_num_vars() && j <= i && j_num_parents > 0) {
+                    scalar_t covariance_ij = shared_round > 0 ? data.get_covariance(i, j) : 0.0;
+
+                    for (int32_t l = 0; l < j_num_parents; l++) {
+                        const int32_t j_parent = data.get_parent(j, l, layer);
+                        const scalar_t j_parent_weight = data.get_weight(j_parent, j, layer);
+                        scalar_t lambda_il = 0.0;
+
+                        for (int32_t k = 0; k < k_max; k++) {
+                            const scalar_t lambda_ikl = i_data[k].value * data.get_covariance(i_data[k].index, j_parent);
+                            lambda_il += lambda_ikl;
+                            covariance_ij += lambda_ikl * j_parent_weight;
+                        }
+
+                        // lambda is computed and stored along with covariance
+                        data.set_lambda(j_parent, i, lambda_il + (shared_round > 0 ? data.get_lambda(j_parent, i) : 0.0));
+                    }
+
+                    data.set_covariance(i, j, covariance_ij);
+                }
+
+                __syncthreads();
+            }
+        }
+
+        template <typename scalar_t>
+        __global__ void backward_covariance_kernel(
+                DeviceData<scalar_t> data,
+                LayerData layer
+        ) {
+            /*
+             * Compute covariance_grad at [i, j].
+             * TODO: A final check is required.
+             */
+            __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_BACKWARD];
+            const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+            const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+            const int32_t i = data.get_layer_var(x, layer);
+            int32_t i_begin, i_end;
+            data.get_children_range(i, i_begin, i_end, layer);
+            const int32_t i_num_children = i_end - i_begin;
+            int32_t j, j_begin, j_end, j_num_children;
+
+            if (y < layer.get_num_vars()) {
+                j = data.get_layer_var(y, layer);
+                data.get_children_range(j, j_begin, j_end, layer);
+                j_num_children = j_end - j_begin;
             }
 
-            data.set_covariance_grad(
-                    i, j,
-                    covariance_grad_ij + (shared_round > 0 ? data.get_covariance_grad(i, j, layer.idx % 2) : 0.0),
-                    layer.idx % 2
-            );
+            auto i_data = reinterpret_cast<child_weight_t<scalar_t> *>(shared_memory);
+            const int32_t shared_size = SHARED_MEMORY_SIZE_BACKWARD / sizeof(child_weight_t<scalar_t>);
+            const array_chunk chunker(i_num_children, shared_size);
+
+            for (int32_t shared_round = 0; shared_round < chunker.num_chunks(); shared_round++) {
+                const int32_t k_max = chunker.chunk_size(shared_round);
+                const int32_t shared_base = chunker.chunk_base(shared_round);
+
+                for (int32_t k = threadIdx.y; k < k_max; k += blockDim.y) {
+                    const int32_t i_child = data.get_child(i, i_begin + shared_base + k, layer);
+                    i_data[k].index = i_child;
+                    i_data[k].value = data.get_weight(i, i_child, layer);
+                }
+
+                __syncthreads();
+
+                if (y < layer.get_num_vars() && j <= i && j_num_children > 0) {
+                    scalar_t covariance_grad_ij = shared_round > 0 ? data.get_covariance_grad(i, j, layer.idx % 2) : 0.0;
+
+                    for (int32_t l = 0; l < j_num_children; l++) {
+                        const int32_t j_child = data.get_child(j, j_begin + l, layer);
+                        const scalar_t j_child_weight = data.get_weight(j, j_child, layer);
+
+                        for (int32_t k = 0; k < k_max; k++) {
+                            covariance_grad_ij += i_data[k].value
+                                                * data.get_covariance_grad(i_data[k].index, j_child, (layer.idx + 1) % 2)
+                                                * j_child_weight;
+                        }
+                    }
+
+                    data.set_covariance_grad(i, j, covariance_grad_ij, layer.idx % 2);
+                }
+
+                __syncthreads();
+            }
         }
 
-        __syncthreads();
-    }
-}
+    //     template <typename scalar_t>
+    //     __global__ void backward_weights_kernel_noshare(
+    //             DeviceData<scalar_t> data,
+    //             LayerData layer
+    //     ) {
+    //         /*
+    //          * Compute weight_grad at [i, j].
+    //          * TODO: A final check is required.
+    //          */
+    //         const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+    //         const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+    //         const int32_t i = data.get_layer_var(x, layer);
+    //         int32_t i_begin, i_end;
+    //         data.get_children_range(i, i_begin, i_end, layer);
+    //
+    //         if (y < i_end) {
+    //             const int32_t j = data.get_child(i, y, layer);
+    //             scalar_t weight_grad_ij = 0.0;
+    //
+    //             for (int32_t k = 0; k < data.get_vis_len(); k++) {
+    //                 weight_grad_ij += data.get_lambda(i, k) * data.get_covariance_grad(k, j, (layer.idx + 1) % 2);
+    //             }
+    //
+    //             data.set_weight_grad(i, j, weight_grad_ij);
+    //         }
+    //     }
 
+        template <typename scalar_t> /* * */
+        __global__ void backward_weights_kernel(
+                DeviceData<scalar_t> data,
+                LayerData layer
+        ) {
+            /*
+             * Compute weight_grad at [i, j].
+             * TODO: A final check is required.
+             */
+            __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_BACKWARD];
+            const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+            const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+            const int32_t i = data.get_layer_var(x, layer);
+            int32_t i_begin, i_end;
+            data.get_children_range(i, i_begin, i_end, layer);
+            const int32_t i_num_children = i_end - i_begin;
 
-template <typename scalar_t>
-__global__ void semnan_cuda_backward_weights_kernel(
-        SEMNANDeviceData<scalar_t> data,
-        SEMNANLayerData layer
-) {
-    /*
-     * Compute weight_grad at [i, j].
-     * TODO: A final check is required.
-     */
-    const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int32_t i = data.get_layer_var(x, layer);
-    int32_t i_begin, i_end;
-    data.get_children_range(i, i_begin, i_end, layer);
+            auto i_data = reinterpret_cast<scalar_t*>(shared_memory);
+            const int32_t shared_size = SHARED_MEMORY_SIZE_BACKWARD / sizeof(scalar_t);
+            const array_chunk chunker(data.get_vis_len(), shared_size);
 
-    if (y < i_end) {
-        const int32_t j = data.get_child(i, y, layer);
-        scalar_t weight_grad_ij = 0.0;
+            for (int32_t shared_round = 0; shared_round < chunker.num_chunks(); shared_round++) {
+                const int32_t k_max = chunker.chunk_size(shared_round);
+                const int32_t shared_base = chunker.chunk_base(shared_round);
 
-        for (int32_t k = 0; k < data.get_vis_len(); k++) {
-            weight_grad_ij += data.get_lambda(i, k) * data.get_covariance_grad(k, j, (layer.idx + 1) % 2);
+                for (int32_t k = threadIdx.y; k < k_max; k += blockDim.y) {
+                    i_data[k] = data.get_lambda(i, shared_base + k);
+                }
+
+                __syncthreads();
+
+                if (y < i_end) {
+                    const int32_t j = data.get_child(i, y, layer);
+                    scalar_t weight_grad_ij = shared_round > 0 ? data.get_weight_grad(i, j, layer) : 0.0;
+
+                    for (int32_t k = 0; k < k_max; k++) {
+                        weight_grad_ij += i_data[k] * data.get_covariance_grad(shared_base + k, j, (layer.idx + 1) % 2);
+                    }
+
+                    data.set_weight_grad(i, j, weight_grad_ij);
+                }
+
+                __syncthreads();
+            }
         }
 
-        data.set_weight_grad(i, j, weight_grad_ij);
-    }
-}
+        // template <typename scalar_t>
+        // void forward_accum(const std::vector<LayerData>& layers_vec, DeviceData<scalar_t>& data) {
+        //     dim3 threads, blocks;
+        //
+        //     for (int32_t l = 1; l < layers_vec.size(); l++) {
+        //         const auto& layer = layers_vec[l];
+        //         const dim3 data_size(layer.get_num_new_vars(), data.get_lat_len());
+        //         const dim3 grid_size = get_grid_size(data_size, cfg::w_accumulation_block_size);
+        //         const size_t mem_size = get_mem_size<scalar_t>(cfg::w_accumulation_block_size);
+        //         forward_accum_kernel<scalar_t><<<grid_size, cfg::w_accumulation_block_size, mem_size>>>(data, layer);
+        //     }
+        // }
 
-std::pair<dim3, dim3> get_blocks_and_threads(const int32_t width, const int32_t height) {
-    const dim3 threads(1, min(height, THREADS_PER_BLOCK));
-    const dim3 blocks(width, (height + threads.y - 1) / threads.y);
-    return std::make_pair(blocks, threads);
-}
+        // The forward CUDA function. Calls the cuda forward kernel layer by layer.
+        template <typename scalar_t>
+        void forward(const std::vector<LayerData>& layers_vec, DeviceData<scalar_t>& data) {
+            dim3 threads, blocks;
 
-// The forward CUDA function. Calls the cuda forward kernel layer by layer.
-template <typename scalar_t>
-void semnan_cuda_forward(const std::vector<SEMNANLayerData>& layers_vec, SEMNANDeviceData<scalar_t>& data) {
-    dim3 threads, blocks;
-
-    for (int32_t l = 1; l < layers_vec.size(); l++) {
-        const auto& layer = layers_vec[l];
-        std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_new_vars(), layer.get_num_vars());
-        semnan_cuda_forward_kernel<scalar_t><<<blocks, threads>>>(data, layer);
-    }
-}
-
-// The forward CUDA function. Calls the two cuda backward kernels concurrently layer by layer.
-// These kernels compute the weights gradient and the temporary covariance gradient.
-template <typename scalar_t>
-void semnan_cuda_backward(const std::vector<SEMNANLayerData>& layers_vec, SEMNANDeviceData<scalar_t>& data) {
-    dim3 threads, blocks;
-    cudaStream_t covariance_stream, weights_stream;
-    cudaStreamCreate(&covariance_stream);
-    cudaStreamCreate(&weights_stream);
-
-    for (int32_t l = layers_vec.size() - 2; l >= 0; l--) {
-        const auto& layer = layers_vec[l];
-        const auto& next_layer = layers_vec[l + 1];
-
-        if (l > 0) {
-            std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), layer.get_num_vars());
-            semnan_cuda_backward_covariance_kernel<scalar_t><<<blocks, threads, 0, covariance_stream>>>(data, layer);
+            for (int32_t l = 1; l < layers_vec.size(); l++) {
+                const auto& layer = layers_vec[l];
+                std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_new_vars(), layer.get_num_vars());
+                forward_kernel<scalar_t><<<blocks, threads>>>(data, layer);
+            }
         }
 
-        std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), next_layer.get_num_new_vars());
-        semnan_cuda_backward_weights_kernel<scalar_t><<<blocks, threads, 0, weights_stream>>>(data, layer);
-        cudaDeviceSynchronize();
+        // The backward CUDA function. Calls the two cuda backward kernels concurrently layer by layer.
+        // These kernels compute the weights gradient and the temporary covariance gradient.
+        template <typename scalar_t>
+        void backward(const std::vector<LayerData>& layers_vec, DeviceData<scalar_t>& data) {
+            dim3 threads, blocks;
+            cudaStream_t covariance_stream, weights_stream;
+            cudaStreamCreate(&covariance_stream);
+            cudaStreamCreate(&weights_stream);
+
+            for (int32_t l = layers_vec.size() - 2; l >= 0; l--) {
+                const auto& layer = layers_vec[l];
+                const auto& next_layer = layers_vec[l + 1];
+
+                if (l > 0) {
+                    std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), layer.get_num_vars());
+                    backward_covariance_kernel<scalar_t><<<blocks, threads, 0, covariance_stream>>>(data, layer);
+                }
+
+                std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), next_layer.get_num_new_vars());
+                backward_weights_kernel<scalar_t><<<blocks, threads, 0, weights_stream>>>(data, layer);
+                cudaDeviceSynchronize();
+            }
+
+            cudaStreamDestroy(covariance_stream);
+            cudaStreamDestroy(weights_stream);
+        }
+
+    //     template <typename scalar_t>
+    //     void lv_transformation(const std::vector<LayerData>& layers_vec, DeviceData<scalar_t>& data) {
+    //         dim3 threads, blocks;
+    //
+    //         for (int32_t l = 1; l < layers_vec.size(); l++) {
+    //             const auto& layer = layers_vec[l];
+    //             std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_new_vars(), data.get_lat_len());
+    //             lv_transformation_kernel<scalar_t><<<blocks, threads>>>(data, layer);
+    //         }
+    //     }
+
+        // ==============
+        // Concrete types
+        template class DeviceData<float>;
+        template class DeviceData<double>;
+
+        template void forward<float>(const std::vector<LayerData>&, DeviceData<float>&);
+        template void forward<double>(const std::vector<LayerData>&, DeviceData<double>&);
+
+        template void backward<float>(const std::vector<LayerData>&, DeviceData<float>&);
+        template void backward<double>(const std::vector<LayerData>&, DeviceData<double>&);
     }
 
-    cudaStreamDestroy(covariance_stream);
-    cudaStreamDestroy(weights_stream);
-}
+//     template void lv_transformation<float>(const std::vector<LayerData>&, DeviceData<float>&);
+//     template void lv_transformation<double>(const std::vector<LayerData>&, DeviceData<double>&);
 
+    namespace accum {
+        template <typename scalar_t>
+        __global__ void forward_kernel(
+                DeviceData<scalar_t> data,
+                LayerData layer
+        ) {
+            /*
+             * Compute W^acc[:, i].
+             */
+            __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_FORWARD];
+            const int32_t i = blockIdx.x * blockDim.x + threadIdx.x + layer.base;
+            const int32_t j = blockIdx.y * blockDim.y + threadIdx.y - data.get_lat_len();
+            const int32_t i_num_parents = data.get_num_parents(i, layer);
 
-template <typename scalar_t>
-void semnan_cuda_lv_transformation(const std::vector<SEMNANLayerData>& layers_vec, SEMNANDeviceData<scalar_t>& data) {
-    dim3 threads, blocks;
+            auto i_data = reinterpret_cast<parent_weight_t<scalar_t> *>(shared_memory);
+            const int32_t shared_size = SHARED_MEMORY_SIZE_FORWARD / sizeof(parent_weight_t<scalar_t>);
+            const array_chunk chunker(i_num_parents, shared_size);
 
-    for (int32_t l = 1; l < layers_vec.size(); l++) {
-        const auto& layer = layers_vec[l];
-        std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_new_vars(), data.get_lat_len());
-        semnan_cuda_lv_transformation_kernel<scalar_t><<<blocks, threads>>>(data, layer);
+            for (int32_t shared_round = 0; shared_round < chunker.num_chunks(); shared_round++) {
+                const int32_t k_max = chunker.chunk_size(shared_round);
+                const int32_t shared_base = chunker.chunk_base(shared_round);
+
+                // Store data to shared memory
+                for (int32_t k = threadIdx.y; k < k_max; k += blockDim.y) {
+                    const int32_t i_parent = data.get_parent(i, shared_base + k, layer);
+                    i_data[k].index = i_parent;
+                    i_data[k].value = data.get_weight(i_parent, i, layer);
+                }
+
+                __syncthreads();
+
+                if (j < 0) {
+                    scalar_t w_accum = shared_round > 0 ? data.get_w_accum(j, i) : 0.0;
+
+                    for (int32_t k = 0; k < k_max; k++) {
+                        w_accum += i_data[k].value * data.get_w_accum(j, i_data[k].index);
+                    }
+
+                    data.set_w_accum(j, i, w_accum);
+                }
+
+                __syncthreads();
+            }
+        }
+
+        template <typename scalar_t>
+        __global__ void backward_omega_kernel(
+                DeviceData<scalar_t> data,
+                LayerData layer
+        ) {
+            /*
+             * Compute omega at [i, j].
+             */
+            const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+            const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+            const int32_t i = data.get_layer_var(x, layer);
+            int32_t i_begin, i_end;
+            data.get_children_range(i, i_begin, i_end, layer);
+
+            if (y < i_end) {
+                const int32_t j = data.get_child(i, y, layer);
+                scalar_t weight_grad_ij = 0.0;
+
+                for (int32_t k = 0; k < data.get_vis_len(); k++) {
+                    weight_grad_ij += data.get_lambda(i, k) * data.get_covariance_grad(k, j, (layer.idx + 1) % 2);
+                }
+
+                data.set_weight_grad(i, j, weight_grad_ij);
+            }
+        }
+
+        template <typename scalar_t>
+        void forward(const std::vector<LayerData>& layers_vec, DeviceData<scalar_t>& data) {
+            dim3 threads, blocks;
+
+            for (int32_t l = 1; l < layers_vec.size(); l++) {
+                const auto& layer = layers_vec[l];
+                std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_new_vars(), data.get_lat_len());
+                forward_kernel<scalar_t><<<blocks, threads>>>(data, layer);
+            }
+        }
+
+        template <typename scalar_t>
+        void backward(const std::vector<LayerData>& layers_vec, DeviceData<scalar_t>& data) {
+    //         dim3 threads, blocks;
+    //         cudaStream_t omega_stream, weights_stream;
+    //         cudaStreamCreate(&omega_stream);
+    //         cudaStreamCreate(&weights_stream);
+    //
+    //         for (int32_t l = layers_vec.size() - 2; l >= 0; l--) {
+    //             const auto& layer = layers_vec[l];
+    //             const auto& next_layer = layers_vec[l + 1];
+    //
+    //             if (l > 0) {
+    //                 std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), layer.get_num_vars());
+    //                 backward_accum_covariance_kernel<scalar_t><<<blocks, threads, 0, covariance_stream>>>(data, layer);
+    //             }
+    //
+    //             std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), next_layer.get_num_new_vars());
+    //             backward_covar_weights_kernel<scalar_t><<<blocks, threads, 0, weights_stream>>>(data, layer);
+    //             cudaDeviceSynchronize();
+    //         }
+    //
+    //         cudaStreamDestroy(omega_stream);
+    //         cudaStreamDestroy(weights_stream);
+        }
+
+        template void forward<float>(const std::vector<LayerData>&, DeviceData<float>&);
+        template void forward<double>(const std::vector<LayerData>&, DeviceData<double>&);
+
+        template void backward<float>(const std::vector<LayerData>&, DeviceData<float>&);
+        template void backward<double>(const std::vector<LayerData>&, DeviceData<double>&);
     }
 }
-
-// ==============
-// Concrete types
-template class SEMNANDeviceData<float>;
-template class SEMNANDeviceData<double>;
-
-template void semnan_cuda_forward<float>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<float>&);
-template void semnan_cuda_forward<double>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<double>&);
-
-template void semnan_cuda_backward<float>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<float>&);
-template void semnan_cuda_backward<double>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<double>&);
-
-template void semnan_cuda_lv_transformation<float>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<float>&);
-template void semnan_cuda_lv_transformation<double>(const std::vector<SEMNANLayerData>&, SEMNANDeviceData<double>&);

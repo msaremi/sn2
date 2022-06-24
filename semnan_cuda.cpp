@@ -31,28 +31,35 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                         std::optional<torch::Tensor> parameters,
                         std::optional<py::object> dtype,
                         std::optional<std::shared_ptr<LossBase>> loss_function,
-                        std::optional<bool> check
+                        std::optional<SEMNANSolver::METHOD> method,
+                        std::optional<bool> validate
                 ) {
                     return SEMNANSolver(
                         structure,
                         parameters.has_value() ? parameters.value() : torch::Tensor(),
                         dtype.has_value() ? torch::python::detail::py_object_to_dtype(dtype.value()) : torch::kFloat,
                         loss_function.has_value() ? loss_function.value() : nullptr,
-                        check.has_value() ? check.value() : true
+                        method.has_value() ? method.value() : SEMNANSolver::METHOD::COVAR,
+                        validate.has_value() ? validate.value() : true
                     );
                 }
             ), py::arg("structure"), py::arg("weights")=std::nullopt, py::arg("dtype")=std::nullopt,
-                    py::arg("loss")=std::nullopt, py::arg("check")=std::nullopt)
+               py::arg("loss")=std::nullopt, py::arg("method")=std::nullopt, py::arg("validate")=std::nullopt)
             .def("forward", &SEMNANSolver::forward)
             .def("backward", &SEMNANSolver::backward)
-            .def("lv_transformation_", &SEMNANSolver::get_lv_transformation)
             .def_property_readonly("lambda_", &SEMNANSolver::get_lambda)
             .def_property_readonly("covariance_", &SEMNANSolver::get_covariance)
+            .def_property_readonly("lv_transformation_", &SEMNANSolver::get_lv_transformation)
             .def_property_readonly("visible_covariance_", &SEMNANSolver::get_visible_covariance)
             .def_property("weights", &SEMNANSolver::get_weights, &SEMNANSolver::set_weights)
             .def_property("sample_covariance", &SEMNANSolver::get_sample_covariance, &SEMNANSolver::set_sample_covariance)
             .def("loss", &SEMNANSolver::loss)
             .def("loss_proxy", &SEMNANSolver::loss_proxy);
+
+    py::enum_<SEMNANSolver::METHOD>(semnan_solver, "METHOD")
+            .value("COVAR", SEMNANSolver::METHOD::COVAR)
+            .value("ACCUM", SEMNANSolver::METHOD::ACCUM)
+            .export_values();
 
     auto loss = m.def_submodule("loss");
 

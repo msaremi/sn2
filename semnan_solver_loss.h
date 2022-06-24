@@ -2,6 +2,7 @@
 #define SEMNAN_CUDA_LOSS_H
 
 #include <torch/extension.h>
+#include "stringify.h"
 #include "declarations.h"
 
 namespace semnan_cuda::loss {
@@ -37,8 +38,8 @@ namespace semnan_cuda::loss {
 
         protected:
         void set_sample_covariance(const torch::Tensor& sample_covariance) {
-            TORCH_CHECK(sample_covariance.dim() == 2, "`sample_covariance` must be 2-dimensional; it is ", sample_covariance.dim(), "-dimensional.");
-            TORCH_CHECK(sample_covariance.size(0) == sample_covariance.size(1), "`sample_covariance` must be a square matrix.");
+            TORCH_CHECK(sample_covariance.dim() == 2, STRINGIFY(sample_covariance) " must be 2-dimensional; it is ", sample_covariance.dim(), "-dimensional.");
+            TORCH_CHECK(sample_covariance.size(0) == sample_covariance.size(1), STRINGIFY(sample_covariance) " must be a square matrix.");
             auto loss_data_iter = loss_data_map.lower_bound(sample_covariance);
 
             if (loss_data_iter != loss_data_map.end() && loss_data_iter->first.is_same(sample_covariance))
