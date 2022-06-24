@@ -3,10 +3,11 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 setup(
     name='semnan_cuda',
+    version='0.9.0',
     ext_modules=[
         CUDAExtension('semnan_cuda', [
-            'semnan_cuda.cpp',
-            'semnan_solver_kernel.cu',
+            'src/semnan_cuda.cpp',
+            'src/semnan_solver_kernel.cu',
         ], extra_compile_args={'cxx': ['/std:c++17']})
     ],
     cmdclass={
