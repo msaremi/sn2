@@ -2,7 +2,7 @@ from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 setup(
-    name='torch_semnan',
+    name='semnan_cuda',
     ext_modules=[
         CUDAExtension('semnan_cuda', [
             'semnan_cuda.cpp',
