@@ -27,7 +27,7 @@ sample_covar = torch.tensor([
 ], dtype=dtype)
 
 params = torch.ones_like(struct, dtype=dtype)
-params += torch.empty_like(params).normal_(0, 3)  # add noise to the ground-truth parameters
+params += torch.empty_like(params).normal_(0, 1)  # add noise to the ground-truth parameters
 
 semnan = SEMNANSolver(struct,                               # AMASEM structure
                       weights=params,                       # initial parameters

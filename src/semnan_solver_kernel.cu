@@ -4,7 +4,7 @@
 #include <vector>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <stdio.h>
+#include <cstdio>
 #include <utility>
 
 namespace semnan_cuda {
@@ -20,9 +20,6 @@ namespace semnan_cuda {
 
     template <typename scalar_t>
     using child_weight_t = indexed_scalar_t<scalar_t>;
-
-    template <typename scalar_t>
-    using neighbour_covariance_t = indexed_scalar_t<scalar_t>;
 
     // A structure for helping chunk arrays, lists, etc.
     class array_chunk {
@@ -51,12 +48,15 @@ namespace semnan_cuda {
         }
     };
 
-
     std::pair<dim3, dim3> get_blocks_and_threads(const int32_t width, const int32_t height) {
         const dim3 threads(1, min(height, THREADS_PER_BLOCK));
         const dim3 blocks(width, (height + threads.y - 1) / threads.y);
         return std::make_pair(blocks, threads);
     }
+
+    // Concrete types
+    template class DeviceData<float>;
+    template class DeviceData<double>;
 
     namespace covar {
         template <typename scalar_t>
@@ -321,12 +321,8 @@ namespace semnan_cuda {
 
         // ==============
         // Concrete types
-        template class DeviceData<float>;
-        template class DeviceData<double>;
-
         template void forward<float>(const std::vector<LayerData>&, DeviceData<float>&);
         template void forward<double>(const std::vector<LayerData>&, DeviceData<double>&);
-
         template void backward<float>(const std::vector<LayerData>&, DeviceData<float>&);
         template void backward<double>(const std::vector<LayerData>&, DeviceData<double>&);
     }
@@ -441,9 +437,9 @@ namespace semnan_cuda {
     //         cudaStreamDestroy(weights_stream);
         }
 
+        // Concrete types
         template void forward<float>(const std::vector<LayerData>&, DeviceData<float>&);
         template void forward<double>(const std::vector<LayerData>&, DeviceData<double>&);
-
         template void backward<float>(const std::vector<LayerData>&, DeviceData<float>&);
         template void backward<double>(const std::vector<LayerData>&, DeviceData<double>&);
     }

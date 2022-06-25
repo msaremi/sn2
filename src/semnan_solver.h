@@ -53,7 +53,7 @@ namespace semnan_cuda {
     // Class SEMNANSolver
     class SEMNANSolver {
         public:
-        enum struct METHOD {
+        enum struct METHODS {
             COVAR = 0,
             ACCUM
         };
@@ -85,7 +85,7 @@ namespace semnan_cuda {
         c10::DeviceIndex cuda_device_number;
         torch::Dtype dtype;
         bool validate;
-        METHOD method;
+        METHODS method;
         void (SEMNANSolver::*forward_method)(void);
         void (SEMNANSolver::*backward_method)(void);
 
@@ -102,7 +102,7 @@ namespace semnan_cuda {
                 const torch::Tensor& parameters,
                 torch::Dtype dtype,
                 std::shared_ptr<LossBase> loss_function,
-                METHOD method,
+                METHODS method,
                 bool validate
         ) {
             this->visible_size = structure.size(1);
@@ -127,7 +127,7 @@ namespace semnan_cuda {
                 // TODO: They need to be connected to at least one variable (latent or visible)
                 TORCH_CHECK(
                     latent_structure.any(0).all(0).item<bool>(),
-                    "All visible variables must be connected to at least one latent variable."
+                    "All visible variables must be connected to at least one other variable."
                 );
 
                 TORCH_CHECK(
@@ -153,9 +153,9 @@ namespace semnan_cuda {
             this->weights.mutable_grad() = torch::zeros_like(this->weights, options);
 
             switch (method) {
-                case METHOD::COVAR:
-                    this->lambda = torch::zeros_like(this->weights, options);
-                    this->covariance = torch::zeros_like(this->weights, options);
+                case METHODS::COVAR:
+                    this->lambda = torch::zeros_like(this->weights);
+                    this->covariance = torch::zeros_like(this->weights);
                     this->covariance.mutable_grad() = torch::zeros({2, total_size, visible_size}, options);
                     this->visible_covariance = this->covariance.index({ Slice(latent_size, None), Slice() });
                     this->visible_covariance.mutable_grad() = this->covariance.mutable_grad().index({ Slice(), Slice(latent_size, None), Slice() });
@@ -164,11 +164,11 @@ namespace semnan_cuda {
                     this->backward_method = &SEMNANSolver::backward_covar;
                     break;
 
-                case METHOD::ACCUM:
+                case METHODS::ACCUM:
                     this->visible_covariance = torch::zeros({visible_size, visible_size}, options);
-                    this->visible_covariance.mutable_grad() = torch::zeros({2, visible_size, visible_size}, options);
+                    this->visible_covariance.mutable_grad() = torch::zeros_like(this->visible_covariance);
                     this->weights_accum = torch::zeros({latent_size, visible_size}, options);
-                    this->omegas = torch::zeros({2, total_size, visible_size}, options);
+                    this->omegas = torch::zeros({2, latent_size, visible_size}, options);
 
                     this->forward_method = &SEMNANSolver::forward_accum;
                     this->backward_method = &SEMNANSolver::backward_accum;
@@ -211,7 +211,7 @@ namespace semnan_cuda {
                 for (int32_t p = -latent_size; p < visible_size; p++) {
                     if (structure[p + latent_size][c].item<bool>()) {
                         if (p < 0) {
-                            auto this_latent = this->latent_presence_range[p + latent_size];
+                            auto&& this_latent = this->latent_presence_range[p + latent_size];
                             this_latent.index_put_(
                                 {Slice(this_latent[0].item<int32_t>() == -1 ? 0 : 1, 2)},
                                 layers_vec.back().idx - 1
@@ -255,7 +255,7 @@ namespace semnan_cuda {
             std::vector<std::vector<int32_t>> latent_neighbors_vec(this->num_layers());
 
             for (int32_t v = -this->latent_size; v < 0; v++) {
-                auto const this_latent = this->latent_presence_range[v + latent_size];
+                const auto&& this_latent = this->latent_presence_range[v + latent_size];
 
                 // `l >= 0` takes care of "loose" latent variables (those with no children)
                 for (int32_t l = this_latent[0].item<int32_t>(); l <= this_latent[1].item<int32_t>() && l >= 0; l++) {
@@ -310,7 +310,7 @@ namespace semnan_cuda {
                 torch::Tensor parameters = torch::Tensor(),
                 torch::Dtype dtype = torch::kFloat,
                 std::shared_ptr<LossBase> loss_function = nullptr,
-                METHOD method = METHOD::COVAR,
+                METHODS method = METHODS::COVAR,
                 bool validate = true
         ) {
             this->init_parameters(structure, parameters, dtype, loss_function, method, validate);
@@ -343,26 +343,37 @@ namespace semnan_cuda {
         }
 
         public:
-        torch::Tensor loss() {
+        inline torch::Tensor loss() {
             return loss_function->loss(visible_covariance);
         }
 
         public:
-        torch::Tensor loss_proxy() {
+        inline torch::Tensor loss_proxy() {
             return loss_function->loss_proxy(visible_covariance);
         }
 
         private:
-        void loss_backward(torch::Tensor visible_covariance_grad) {
+        inline void loss_backward(torch::Tensor&& visible_covariance_grad) {
             loss_function->loss_backward(visible_covariance, visible_covariance_grad);
+        }
+
+        private:
+        inline torch::Tensor get_output_covariance_grad() {
+            return this->method == METHODS::COVAR ?
+                   visible_covariance.mutable_grad()[(this->num_layers() + 1) % 2] :
+                   visible_covariance.mutable_grad();
+        }
+
+        private:
+        inline torch::Tensor get_output_omega() {
+            return omegas[(this->num_layers() + 1) % 2];
         }
 
         public:
         torch::Tensor get_lv_transformation() {
-            TORCH_CHECK(this->method == METHOD::ACCUM,
-                        STRINGIFY(weights_accum) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHOD::COVAR)
-                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(METHOD::ACCUM) "."
-            );
+            TORCH_CHECK(this->method == METHODS::ACCUM,
+                        STRINGIFY(weights_accum) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::COVAR)
+                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(METHODS::ACCUM) ".");
             return this->weights_accum;
         }
 
@@ -399,8 +410,8 @@ namespace semnan_cuda {
 
         private:
         void backward_accum() {
-            // FIXME: Implement method.
-            TORCH_CHECK(false, STRINGIFY(backward_accum) " has not been implemented yet. Try using " STRINGIFY(backward_covar)  ".");
+            torch::Tensor&& output_omega = get_output_omega();
+            torch::matmul_out(output_omega, weights_accum, get_output_covariance_grad());
             AT_DISPATCH_FLOATING_TYPES(dtype, "SEMNANSolver::backward_accum", ([&] {
                 accum::backward<scalar_t>(this->layers_vec, std::get<DeviceData<scalar_t>>(this->data));
             }));
@@ -415,7 +426,7 @@ namespace semnan_cuda {
 
         public:
         void backward() {
-            loss_backward(visible_covariance.mutable_grad()[(this->num_layers() + 1) % 2]);
+            loss_backward(get_output_covariance_grad());
             (this->*backward_method)();
         }
 
@@ -431,10 +442,10 @@ namespace semnan_cuda {
 
         public:
         torch::Tensor& get_covariance() {
-            TORCH_CHECK(this->method == METHOD::COVAR,
-                        STRINGIFY(covariance) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHOD::ACCUM)
-                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(METHOD::COVAR) "."
-            );
+            TORCH_CHECK(this->method == METHODS::COVAR,
+                        STRINGIFY(covariance) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::ACCUM)
+                        ". Consider using " STRINGIFY(visible_covariance) " or initializing " STRINGIFY(SEMNANSolver)
+                        " with " STRINGIFY(method=METHODS::COVAR) ".");
             return this->covariance;
         }
 
@@ -445,11 +456,18 @@ namespace semnan_cuda {
 
         public:
         torch::Tensor& get_lambda() {
-            TORCH_CHECK(this->method == METHOD::COVAR,
-                        STRINGIFY(lambda) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHOD::ACCUM)
-                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(METHOD::COVAR) "."
-            );
+            TORCH_CHECK(this->method == METHODS::COVAR,
+                        STRINGIFY(lambda) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::ACCUM)
+                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(method=METHODS::COVAR) ".");
             return this->lambda;
+        }
+
+        public:
+        torch::Tensor& get_omegas() {
+            TORCH_CHECK(this->method == METHODS::ACCUM,
+                        STRINGIFY(omegas) " are not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::COVAR)
+                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(method=METHODS::ACCUM) ".");
+            return this->omegas;
         }
     };
 }

@@ -8,10 +8,12 @@ setup(
         CUDAExtension('semnan_cuda', [
             'src/semnan_cuda.cpp',
             'src/semnan_solver_kernel.cu',
-        ], extra_compile_args={'cxx': ['/std:c++17']})
+        ], extra_compile_args={
+            'cxx': ['/std:c++17', '/permissive-'],
+        })
     ],
     cmdclass={
-        'build_ext': BuildExtension
+        'build_ext': BuildExtension,
     },
     install_requires=[
        'torch>=1.10.1+cu102',

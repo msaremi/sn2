@@ -2,7 +2,7 @@
 
 ## Installation
 
-Installation requires the NVCC compiler with a ABI-compatible C++ compiler. 
+Installation requires the NVCC compiler with an ABI-compatible C++ compiler. 
 A pre-compiled egg is available [here](dist).
 
 To intall, use:
