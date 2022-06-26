@@ -129,7 +129,6 @@ namespace semnan_cuda {
         ) {
             /*
              * Compute covariance_grad at [i, j].
-             * TODO: A final check is required.
              */
             __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_BACKWARD];
             const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -190,7 +189,6 @@ namespace semnan_cuda {
     //     ) {
     //         /*
     //          * Compute weight_grad at [i, j].
-    //          * TODO: A final check is required.
     //          */
     //         const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
     //         const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -217,7 +215,6 @@ namespace semnan_cuda {
         ) {
             /*
              * Compute weight_grad at [i, j].
-             * TODO: A final check is required.
              */
             __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_BACKWARD];
             const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -308,17 +305,6 @@ namespace semnan_cuda {
             cudaStreamDestroy(weights_stream);
         }
 
-    //     template <typename scalar_t>
-    //     void lv_transformation(const std::vector<LayerData>& layers_vec, DeviceData<scalar_t>& data) {
-    //         dim3 threads, blocks;
-    //
-    //         for (int32_t l = 1; l < layers_vec.size(); l++) {
-    //             const auto& layer = layers_vec[l];
-    //             std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_new_vars(), data.get_lat_len());
-    //             lv_transformation_kernel<scalar_t><<<blocks, threads>>>(data, layer);
-    //         }
-    //     }
-
         // ==============
         // Concrete types
         template void forward<float>(const std::vector<LayerData>&, DeviceData<float>&);
@@ -326,9 +312,6 @@ namespace semnan_cuda {
         template void backward<float>(const std::vector<LayerData>&, DeviceData<float>&);
         template void backward<double>(const std::vector<LayerData>&, DeviceData<double>&);
     }
-
-//     template void lv_transformation<float>(const std::vector<LayerData>&, DeviceData<float>&);
-//     template void lv_transformation<double>(const std::vector<LayerData>&, DeviceData<double>&);
 
     namespace accum {
         template <typename scalar_t>
@@ -375,29 +358,113 @@ namespace semnan_cuda {
             }
         }
 
+//         template <typename scalar_t>
+//         __global__ void backward_omega_kernel_noshare(DeviceData<scalar_t> data, LayerData layer) {
+//            const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+//            const int32_t i = data.get_layer_var(x, layer);
+//            const int32_t j = blockIdx.y * blockDim.y + threadIdx.y - data.get_lat_len();
+//            int32_t i_begin, i_end;
+//            data.get_children_range(i, i_begin, i_end, layer);
+//
+//             if (j < 0) {
+//                 scalar_t omega_ji = 0.0;
+//
+//                 for (int32_t k = i_begin; k < i_end; k++) {
+//                     const int32_t i_child = data.get_child(i, k, layer);
+//                    omega_ji += data.get_weight(i, i_child, layer) * data.get_omega(j, i_child, (layer.idx + 1) % 2);
+//                 }
+//
+//                 data.set_omega(j, i, omega_ji, layer.idx % 2);
+//             }
+//         }
+
         template <typename scalar_t>
         __global__ void backward_omega_kernel(
                 DeviceData<scalar_t> data,
                 LayerData layer
         ) {
+            __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_BACKWARD];
+            const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+            const int32_t i = data.get_layer_var(x, layer);
+            const int32_t j = blockIdx.y * blockDim.y + threadIdx.y - data.get_lat_len();
+            int32_t i_begin, i_end;
+            data.get_children_range(i, i_begin, i_end, layer);
+            const int32_t i_num_children = i_end - i_begin;
+
+            auto i_data = reinterpret_cast<child_weight_t<scalar_t> *>(shared_memory);
+            const int32_t shared_size = SHARED_MEMORY_SIZE_BACKWARD / sizeof(child_weight_t<scalar_t>);
+            const array_chunk chunker(i_num_children, shared_size);
+
+            for (int32_t shared_round = 0; shared_round < chunker.num_chunks(); shared_round++) {
+                const int32_t k_max = chunker.chunk_size(shared_round);
+                const int32_t shared_base = chunker.chunk_base(shared_round);
+
+                for (int32_t k = threadIdx.y; k < k_max; k += blockDim.y) {
+                    const int32_t i_child = data.get_child(i, i_begin + shared_base + k, layer);
+                    i_data[k].index = i_child;
+                    i_data[k].value = data.get_weight(i, i_child, layer);
+                }
+
+                __syncthreads();
+
+                if (j < 0) {
+                    scalar_t omega_ji = shared_round > 0 ? data.get_omega(j, i, layer.idx % 2) : 0.0;
+
+                    for (int32_t k = 0; k < k_max; k++) {
+                        omega_ji += i_data[k].value
+                                  * data.get_omega(j, i_data[k].index, (layer.idx + 1) % 2);
+                    }
+
+                    data.set_omega(j, i, omega_ji, layer.idx % 2);
+                }
+
+                __syncthreads();
+            }
+        }
+
+        template <typename scalar_t>
+        __global__ void backward_weights_kernel(
+                DeviceData<scalar_t> data,
+                LayerData layer
+        ) {
             /*
-             * Compute omega at [i, j].
+             * Compute weight_grad at [i, j].
              */
+            __shared__ unsigned char shared_memory[SHARED_MEMORY_SIZE_BACKWARD];
             const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
             const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
             const int32_t i = data.get_layer_var(x, layer);
             int32_t i_begin, i_end;
             data.get_children_range(i, i_begin, i_end, layer);
+            const int32_t i_num_children = i_end - i_begin;
+            const int32_t lat_len = data.get_lat_len();
 
-            if (y < i_end) {
-                const int32_t j = data.get_child(i, y, layer);
-                scalar_t weight_grad_ij = 0.0;
+            auto i_data = reinterpret_cast<scalar_t*>(shared_memory);
+            const int32_t shared_size = SHARED_MEMORY_SIZE_BACKWARD / sizeof(scalar_t);
+            const array_chunk chunker(lat_len, shared_size);
 
-                for (int32_t k = 0; k < data.get_vis_len(); k++) {
-                    weight_grad_ij += data.get_lambda(i, k) * data.get_covariance_grad(k, j, (layer.idx + 1) % 2);
+            for (int32_t shared_round = 0; shared_round < chunker.num_chunks(); shared_round++) {
+                const int32_t k_max = chunker.chunk_size(shared_round);
+                const int32_t shared_base = chunker.chunk_base(shared_round);
+
+                for (int32_t k = threadIdx.y; k < k_max; k += blockDim.y) {
+                    i_data[k] = data.get_w_accum(shared_base + k - lat_len, i);
                 }
 
-                data.set_weight_grad(i, j, weight_grad_ij);
+                __syncthreads();
+
+                if (y < i_end) {
+                    const int32_t j = data.get_child(i, y, layer);
+                    scalar_t weight_grad_ij = shared_round > 0 ? data.get_weight_grad(i, j, layer) : 0.0;
+
+                    for (int32_t k = 0; k < k_max; k++) {
+                        weight_grad_ij += i_data[k] * data.get_omega(shared_base + k - lat_len, j, (layer.idx + 1) % 2);
+                    }
+
+                    data.set_weight_grad(i, j, weight_grad_ij);
+                }
+
+                __syncthreads();
             }
         }
 
@@ -414,27 +481,27 @@ namespace semnan_cuda {
 
         template <typename scalar_t>
         void backward(const std::vector<LayerData>& layers_vec, DeviceData<scalar_t>& data) {
-    //         dim3 threads, blocks;
-    //         cudaStream_t omega_stream, weights_stream;
-    //         cudaStreamCreate(&omega_stream);
-    //         cudaStreamCreate(&weights_stream);
-    //
-    //         for (int32_t l = layers_vec.size() - 2; l >= 0; l--) {
-    //             const auto& layer = layers_vec[l];
-    //             const auto& next_layer = layers_vec[l + 1];
-    //
-    //             if (l > 0) {
-    //                 std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), layer.get_num_vars());
-    //                 backward_accum_covariance_kernel<scalar_t><<<blocks, threads, 0, covariance_stream>>>(data, layer);
-    //             }
-    //
-    //             std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), next_layer.get_num_new_vars());
-    //             backward_covar_weights_kernel<scalar_t><<<blocks, threads, 0, weights_stream>>>(data, layer);
-    //             cudaDeviceSynchronize();
-    //         }
-    //
-    //         cudaStreamDestroy(omega_stream);
-    //         cudaStreamDestroy(weights_stream);
+            dim3 threads, blocks;
+            cudaStream_t omega_stream, weights_stream;
+            cudaStreamCreate(&omega_stream);
+            cudaStreamCreate(&weights_stream);
+
+            for (int32_t l = layers_vec.size() - 2; l >= 0; l--) {
+                const auto& layer = layers_vec[l];
+                const auto& next_layer = layers_vec[l + 1];
+
+                if (l > 0) {
+                    std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), data.get_lat_len());
+                    backward_omega_kernel<scalar_t><<<blocks, threads, 0, omega_stream>>>(data, layer);
+                }
+
+                std::tie(blocks, threads) = get_blocks_and_threads(layer.get_num_vars(), next_layer.get_num_new_vars());
+                backward_weights_kernel<scalar_t><<<blocks, threads, 0, weights_stream>>>(data, layer);
+                cudaDeviceSynchronize();
+            }
+
+            cudaStreamDestroy(omega_stream);
+            cudaStreamDestroy(weights_stream);
         }
 
         // Concrete types

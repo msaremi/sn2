@@ -71,7 +71,7 @@ namespace semnan_cuda {
         torch::Tensor latent_neighbors;         // ^
         torch::Tensor latent_neighbors_bases;   // ^
         torch::Tensor latent_presence_range;    // ^
-        std::vector<LayerData> layers_vec;// ^
+        std::vector<LayerData> layers_vec;      // ^
         torch::Tensor weights_accum;
         torch::Tensor omegas;
         std::variant<
@@ -82,7 +82,7 @@ namespace semnan_cuda {
 
         int32_t visible_size;                   // Number of visible variables (|V|)
         int32_t latent_size;                    // Number of latent variables (|V| + |L|)
-        c10::DeviceIndex cuda_device_number;
+        torch::DeviceIndex cuda_device_number;
         torch::Dtype dtype;
         bool validate;
         METHODS method;
@@ -100,57 +100,63 @@ namespace semnan_cuda {
         void init_parameters(
                 const torch::Tensor& structure,
                 const torch::Tensor& parameters,
+                const torch::Tensor& sample_covariance,
                 torch::Dtype dtype,
                 std::shared_ptr<LossBase> loss_function,
                 METHODS method,
                 bool validate
         ) {
+            const int32_t total_size = structure.size(0);
             this->visible_size = structure.size(1);
-            this->latent_size = structure.size(0) - visible_size;
-            this->structure = structure;
+            this->latent_size = total_size - visible_size;
             this->dtype = dtype;
             this->method = method;
             this->validate = validate;
-            const int32_t total_size = latent_size + visible_size;
 
-            TORCH_CHECK(structure.is_cuda(), STRINGIFY(structure) " must be a CUDA tensor.");
-            TORCH_CHECK(structure.dim() == 2, STRINGIFY(structure) " must be 2-dimensional; it is ", structure.dim(), "-dimensional.");
-            TORCH_CHECK(structure.numel() > 0, STRINGIFY(structure) " needs at least one element.");
-            TORCH_CHECK(latent_size >= 0, STRINGIFY(structure) " must be a vertical-rectangular matrix.");
-            TORCH_CHECK(dtype == torch::kFloat || dtype == torch::kDouble, STRINGIFY(dtype) " must be either " STRINGIFY(torch::kFloat) " or " STRINGIFY(torch::kDouble) ".");
-            TORCH_CHECK(!parameters.defined() || parameters.sizes() == structure.sizes(), STRINGIFY(parameters) " must be of the same size as " STRINGIFY(structure) ".");
+            TORCH_CHECK(torch::cuda::is_available(), "CUDA is not available. " STRINGIFY(SEMNANSolver) " needs CUDA to run.")
+            TORCH_CHECK(structure.dim() == 2, STRINGIFY(structure) " must be 2-dimensional; it is ", structure.dim(), "-dimensional.")
+            TORCH_CHECK(structure.numel() > 0, STRINGIFY(structure) " needs at least one element.")
+            TORCH_CHECK(latent_size >= 0, STRINGIFY(structure) " must be a vertical-rectangular matrix.")
+            TORCH_CHECK(dtype == torch::kFloat || dtype == torch::kDouble, STRINGIFY(dtype) " must be either " STRINGIFY(torch::kFloat) " or " STRINGIFY(torch::kDouble) ".")
+            TORCH_CHECK(!parameters.defined() || parameters.sizes() == structure.sizes(), STRINGIFY(parameters) " must be of the same size as " STRINGIFY(structure) ".")
+
+            this->cuda_device_number = structure.device().is_cuda() ? structure.device().index() : -1;
+            const bool parameters_exist = parameters.defined();
+            const auto& base = parameters_exist ? parameters : structure;
+            torch::TensorOptions options = torch::TensorOptions()
+                    .dtype(dtype)
+                    .device(torch::kCUDA, this->cuda_device_number)
+                    .requires_grad(false);
+            this->structure = structure.to(options.dtype(torch::kBool));
 
             if (validate) {
-                auto latent_structure = structure.index({Slice(None, this->latent_size), Slice()});
-                auto visible_structure = structure.index({Slice(this->latent_size, None), Slice()});
+                auto&& latent_structure = this->structure.index({Slice(None, this->latent_size), Slice()});
+                auto&& visible_structure = this->structure.index({Slice(this->latent_size, None), Slice()});
 
                 // TODO: They need to be connected to at least one variable (latent or visible)
                 TORCH_CHECK(
-                    latent_structure.any(0).all(0).item<bool>(),
-                    "All visible variables must be connected to at least one other variable."
-                );
+                        latent_structure.any(0).all(0).item<bool>(),
+                        "All visible variables must be connected to at least one latent variable."
+                )
 
                 TORCH_CHECK(
-                    !torch::tril(visible_structure).any().item<bool>(),
-                    "Visible space must be an upper-triangular matrix."
-                );
+                        !torch::tril(visible_structure).any().item<bool>(),
+                        "Visible space must be an upper-triangular matrix."
+                )
 
-                if (latent_structure.any(1).logical_not().any(0).item<bool>())
-                    TORCH_WARN_ONCE("There are loose variables in the latent space.");
+                if (latent_structure.any(1).logical_not().any(0).item<bool>()) {
+                    TORCH_WARN_ONCE("There are loose variables in the latent space.")
+                }
             }
 
-            const bool parameters_exist = parameters.defined();
-            const auto& base = parameters_exist ? parameters : structure;
-
-            this->cuda_device_number = base.device().is_cuda() ? base.device().index() : -1;
-            torch::TensorOptions options = torch::TensorOptions()
-                                                  .dtype(dtype)
-                                                  .device(torch::kCUDA, this->cuda_device_number)
-                                                  .requires_grad(false);
-
             this->weights = base.to(options);
-            this->weights *= parameters_exist ? this->structure : torch::randn_like(this->weights, options);
-            this->weights.mutable_grad() = torch::zeros_like(this->weights, options);
+            this->weights *= parameters_exist ? this->structure : torch::randn_like(this->weights);
+            this->weights.mutable_grad() = torch::zeros_like(this->weights);
+            this->loss_function = loss_function ? loss_function : std::make_shared<KullbackLeibler>();
+
+            if (sample_covariance.defined()) {
+                this->set_sample_covariance(sample_covariance);
+            }
 
             switch (method) {
                 case METHODS::COVAR:
@@ -168,24 +174,21 @@ namespace semnan_cuda {
                     this->visible_covariance = torch::zeros({visible_size, visible_size}, options);
                     this->visible_covariance.mutable_grad() = torch::zeros_like(this->visible_covariance);
                     this->weights_accum = torch::zeros({latent_size, visible_size}, options);
-                    this->omegas = torch::zeros({2, latent_size, visible_size}, options);
+                    this->omegas = torch::zeros({2, latent_size, total_size}, options);
 
                     this->forward_method = &SEMNANSolver::forward_accum;
                     this->backward_method = &SEMNANSolver::backward_accum;
                     break;
             }
-
-            this->loss_function = loss_function ? loss_function : std::make_shared<KullbackLeibler>();
         }
 
         private:
         void make_structures() {
             const int32_t total_size = latent_size + visible_size;
             torch::TensorOptions options = torch::TensorOptions()
-                                                  .dtype(torch::kInt32)
-                                                  .device(torch::kCUDA, this->cuda_device_number)
-                                                  .requires_grad(false);
-
+                    .dtype(torch::kInt32)
+                    .device(torch::kCUDA, this->cuda_device_number)
+                    .requires_grad(false);
             int32_t edge_count = 0, rev_edge_count = 0;
             std::vector<std::vector<int32_t>> parents_vec(this->visible_size);
             std::vector<std::vector<std::vector<int32_t>>> children_vec({std::vector<std::vector<int32_t>>(total_size)});
@@ -278,6 +281,34 @@ namespace semnan_cuda {
         }
 
         private:
+        inline void init_data() {
+            AT_DISPATCH_FLOATING_TYPES(dtype, "DeviceData::init", ([&] {
+                this->data = DeviceData<scalar_t>(
+                        structure.data_ptr<bool>(),
+                        try_get_data_ptr<scalar_t>(lambda),
+                        try_get_data_ptr<scalar_t>(weights),
+                        try_get_data_ptr<scalar_t>(covariance),
+                        try_get_data_ptr<scalar_t>(weights.mutable_grad()),
+                        try_get_data_ptr<scalar_t>(weights_accum),
+                        try_get_data_ptr<scalar_t>(covariance.mutable_grad()),
+                        try_get_data_ptr<scalar_t>(omegas),
+
+                        parents.data_ptr<int32_t>(),
+                        parents_bases.data_ptr<int32_t>(),
+                        children.data_ptr<int32_t>(),
+                        children_bases.data_ptr<int32_t>(),
+                        latent_neighbors.data_ptr<int32_t>(),
+                        latent_neighbors_bases.data_ptr<int32_t>(),
+
+                        latent_presence_range.data_ptr<int32_t>(),
+                        visible_size,
+                        latent_size,
+                        num_layers()
+                );
+            }));
+        }
+
+        private:
         /**
          * Returns the data_ptr of a (sub-)tensor; returns nullptr if tensor is not defined.
          * @param tensor the tensor from which the data_ptr is taken
@@ -307,53 +338,39 @@ namespace semnan_cuda {
          */
         SEMNANSolver(
                 torch::Tensor structure,
-                torch::Tensor parameters = torch::Tensor(),
+                std::optional<torch::Tensor> parameters = std::nullopt,
+                std::optional<torch::Tensor> sample_covariance = std::nullopt,
                 torch::Dtype dtype = torch::kFloat,
                 std::shared_ptr<LossBase> loss_function = nullptr,
                 METHODS method = METHODS::COVAR,
                 bool validate = true
         ) {
-            this->init_parameters(structure, parameters, dtype, loss_function, method, validate);
+            this->init_parameters(
+                    structure,
+                    parameters.has_value() ? parameters.value() : torch::Tensor(),
+                    sample_covariance.has_value() ? sample_covariance.value() : torch::Tensor(),
+                    dtype, loss_function, method, validate
+            );
+
             this->make_structures();
-
-            AT_DISPATCH_FLOATING_TYPES(dtype, "DeviceData::init", ([&] {
-                this->data = DeviceData<scalar_t>(
-                        structure.data_ptr<bool>(),
-                        try_get_data_ptr<scalar_t>(lambda),
-                        try_get_data_ptr<scalar_t>(weights),
-                        try_get_data_ptr<scalar_t>(covariance),
-                        try_get_data_ptr<scalar_t>(weights.mutable_grad()),
-                        try_get_data_ptr<scalar_t>(weights_accum),
-                        try_get_data_ptr<scalar_t>(covariance.mutable_grad()),
-                        try_get_data_ptr<scalar_t>(omegas),
-
-                        parents.data_ptr<int32_t>(),
-                        parents_bases.data_ptr<int32_t>(),
-                        children.data_ptr<int32_t>(),
-                        children_bases.data_ptr<int32_t>(),
-                        latent_neighbors.data_ptr<int32_t>(),
-                        latent_neighbors_bases.data_ptr<int32_t>(),
-
-                        latent_presence_range.data_ptr<int32_t>(),
-                        visible_size,
-                        latent_size,
-                        num_layers()
-                );
-            }));
+            this->init_data();
         }
 
         public:
         inline torch::Tensor loss() {
+            loss_function->check_has_sample_covariance();
             return loss_function->loss(visible_covariance);
         }
 
         public:
         inline torch::Tensor loss_proxy() {
+            loss_function->check_has_sample_covariance();
             return loss_function->loss_proxy(visible_covariance);
         }
 
         private:
         inline void loss_backward(torch::Tensor&& visible_covariance_grad) {
+            loss_function->check_has_sample_covariance();
             loss_function->loss_backward(visible_covariance, visible_covariance_grad);
         }
 
@@ -366,25 +383,31 @@ namespace semnan_cuda {
 
         private:
         inline torch::Tensor get_output_omega() {
-            return omegas[(this->num_layers() + 1) % 2];
+//            return omegas[(this->num_layers() + 1) % 2];
+            return omegas.index({(this->num_layers() + 1) % 2, Slice(), Slice(latent_size, None)});
         }
 
         public:
         torch::Tensor get_lv_transformation() {
             TORCH_CHECK(this->method == METHODS::ACCUM,
                         STRINGIFY(weights_accum) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::COVAR)
-                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(METHODS::ACCUM) ".");
+                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(METHODS::ACCUM) ".")
             return this->weights_accum;
+        }
+
+        private:
+        inline bool has_sample_covariance() {
+            return this->loss_function->has_sample_covariance();
         }
 
         public:
         void set_sample_covariance(const torch::Tensor& sample_covariance) {
-            TORCH_CHECK(sample_covariance.size(0) == visible_size, STRINGIFY(sample_covariance) " must be a ", visible_size, "×", visible_size, " matrix.");
+            TORCH_CHECK(sample_covariance.size(0) == visible_size, STRINGIFY(sample_covariance) " must be a ", visible_size, "×", visible_size, " matrix.")
             this->loss_function->set_sample_covariance(sample_covariance.to(this->weights.options()));
         }
 
         public:
-        torch::Tensor& get_sample_covariance() {
+        const torch::Tensor& get_sample_covariance() const {
            return this->loss_function->get_sample_covariance();
         }
 
@@ -436,7 +459,7 @@ namespace semnan_cuda {
         }
 
         public:
-        void set_weights(torch::Tensor& weights) {
+        void set_weights(const torch::Tensor& weights) {
             this->weights.copy_(weights);
         }
 
@@ -445,7 +468,7 @@ namespace semnan_cuda {
             TORCH_CHECK(this->method == METHODS::COVAR,
                         STRINGIFY(covariance) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::ACCUM)
                         ". Consider using " STRINGIFY(visible_covariance) " or initializing " STRINGIFY(SEMNANSolver)
-                        " with " STRINGIFY(method=METHODS::COVAR) ".");
+                        " with " STRINGIFY(method=METHODS::COVAR) ".")
             return this->covariance;
         }
 
@@ -458,7 +481,7 @@ namespace semnan_cuda {
         torch::Tensor& get_lambda() {
             TORCH_CHECK(this->method == METHODS::COVAR,
                         STRINGIFY(lambda) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::ACCUM)
-                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(method=METHODS::COVAR) ".");
+                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(method=METHODS::COVAR) ".")
             return this->lambda;
         }
 
@@ -466,7 +489,7 @@ namespace semnan_cuda {
         torch::Tensor& get_omegas() {
             TORCH_CHECK(this->method == METHODS::ACCUM,
                         STRINGIFY(omegas) " are not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::COVAR)
-                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(method=METHODS::ACCUM) ".");
+                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(method=METHODS::ACCUM) ".")
             return this->omegas;
         }
     };

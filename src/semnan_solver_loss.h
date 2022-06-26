@@ -38,8 +38,8 @@ namespace semnan_cuda::loss {
 
         protected:
         void set_sample_covariance(const torch::Tensor& sample_covariance) {
-            TORCH_CHECK(sample_covariance.dim() == 2, STRINGIFY(sample_covariance) " must be 2-dimensional; it is ", sample_covariance.dim(), "-dimensional.");
-            TORCH_CHECK(sample_covariance.size(0) == sample_covariance.size(1), STRINGIFY(sample_covariance) " must be a square matrix.");
+            TORCH_CHECK(sample_covariance.dim() == 2, STRINGIFY(sample_covariance) " must be 2-dimensional; it is ", sample_covariance.dim(), "-dimensional.")
+            TORCH_CHECK(sample_covariance.size(0) == sample_covariance.size(1), STRINGIFY(sample_covariance) " must be a square matrix.")
             auto loss_data_iter = loss_data_map.lower_bound(sample_covariance);
 
             if (loss_data_iter != loss_data_map.end() && loss_data_iter->first.is_same(sample_covariance))
@@ -53,21 +53,18 @@ namespace semnan_cuda::loss {
             this->sample_covariance = sample_covariance;
         }
 
-        protected:
-        torch::Tensor& get_sample_covariance_inv() {
-            if (!loss_data->sample_covariance_inv.defined())
-                loss_data->sample_covariance_inv = torch::inverse(get_sample_covariance());
+        private:
+        inline void check_has_sample_covariance() {
+            TORCH_CHECK(has_sample_covariance(), STRINGIFY(sample_covariance) " has not been set.")
+        }
 
-            return loss_data->sample_covariance_inv;
+        protected:
+        const bool has_sample_covariance() const {
+            return this->sample_covariance.defined();
         }
 
         protected:
         const torch::Tensor& get_sample_covariance() const {
-           return this->sample_covariance;
-        }
-
-        protected:
-        torch::Tensor& get_sample_covariance() {
            return this->sample_covariance;
         }
 
@@ -92,13 +89,13 @@ namespace semnan_cuda::loss {
             return this->loss_data->sample_covariance_logdet;
         }
 
-        public:
+        protected:
         virtual torch::Tensor loss_proxy(const torch::Tensor& visible_covariance) const = 0;
 
-        public:
+        protected:
         virtual torch::Tensor loss(const torch::Tensor& visible_covariance) const = 0;
 
-        public:
+        protected:
         virtual void loss_backward(const torch::Tensor& visible_covariance, torch::Tensor& visible_covariance_grad) const = 0;
 
         public:
@@ -108,7 +105,7 @@ namespace semnan_cuda::loss {
     };
 
     class KullbackLeibler : public LossBase {
-        public:
+        protected:
         virtual torch::Tensor loss_proxy(const torch::Tensor& visible_covariance) const {
             return torch::subtract(
                 torch::trace(torch::mm(get_sample_covariance_inv(), visible_covariance)),
@@ -116,7 +113,7 @@ namespace semnan_cuda::loss {
             );
         }
 
-        public:
+        protected:
         virtual torch::Tensor loss(const torch::Tensor& visible_covariance) const {
             return torch::div(
                 torch::add(
@@ -126,7 +123,7 @@ namespace semnan_cuda::loss {
             , 2.0);
         }
 
-        public:
+        protected:
         virtual void loss_backward(const torch::Tensor& visible_covariance, torch::Tensor& visible_covariance_grad) const {
             visible_covariance_grad.copy_(get_sample_covariance_inv());
             visible_covariance_grad.subtract_(torch::inverse(visible_covariance));
@@ -134,7 +131,7 @@ namespace semnan_cuda::loss {
     };
 
     class Bhattacharyya : public LossBase {
-        public:
+        protected:
         virtual torch::Tensor loss_proxy(const torch::Tensor& visible_covariance) const {
             return torch::div(
                 torch::det(
@@ -144,7 +141,7 @@ namespace semnan_cuda::loss {
             );
         }
 
-        public:
+        protected:
         virtual torch::Tensor loss(const torch::Tensor& visible_covariance) const {
             return torch::div(
                 torch::log(
@@ -153,7 +150,7 @@ namespace semnan_cuda::loss {
             );
         }
 
-        public:
+        protected:
         virtual void loss_backward(const torch::Tensor& visible_covariance, torch::Tensor& visible_covariance_grad) const {
             visible_covariance_grad.copy_(torch::inverse(torch::add(get_sample_covariance(), visible_covariance)));
             visible_covariance_grad.subtract_(torch::div(torch::inverse(visible_covariance), 2.0));

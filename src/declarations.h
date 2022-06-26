@@ -4,7 +4,7 @@
 namespace semnan_cuda {
     class SEMNANSolver;
 
-    namespace less {
+    namespace loss {
         class SEMNANSolverLoss;
     }
 }

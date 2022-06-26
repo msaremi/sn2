@@ -17,15 +17,6 @@ namespace semnan_cuda {
         int32_t lat_width;
 
 #ifdef __CUDACC__
-    //    public:
-    //    LayerData(
-    //        const int32_t idx,
-    //        const int32_t base
-    //    );
-    //
-    //    public:
-    //    LayerData();
-
         public:
         __device__ __host__ __forceinline__ int32_t get_num_vars() const {
             return base + num + lat_width;
@@ -57,9 +48,11 @@ namespace semnan_cuda {
 #endif
     };
 
-    // Stores the lambda, weights, covariance matrices along with
-    // the weights_grad and the two covariance_grads buffers.
-    // It provides a view to get/set elements in the matrices.
+    /**
+     * Stores the reference to all the matrices that are passed to kernel functions
+     * facilitates access to matrix entries by providing a model-view architecture
+     * @tparam scalar_t `float` or `double`
+     */
     template <typename scalar_t>
     class DeviceData {
         private:
@@ -148,6 +141,20 @@ namespace semnan_cuda {
         }
 
         public:
+        __device__ __forceinline__ scalar_t get_omega(int32_t a, int32_t d, int8_t buff) const {
+            if (a < 0) {
+                return omegas[buff][(a + lat_len) * (lat_len + vis_len) + (d + lat_len)];
+            } else
+                return 0.0;
+        }
+
+        public:
+        __device__ __forceinline__ void set_omega(int32_t a, int32_t d, scalar_t val, int8_t buff) {
+            if (a < 0)
+                omegas[buff][(a + lat_len) * (lat_len + vis_len) + (d + lat_len)] = val;
+        }
+
+        public:
         __device__ __forceinline__ scalar_t get_covariance_grad(int32_t u, int32_t v, int8_t buff) const {
             if (u >= 0 || v >= 0) {
                 return covariance_grads[buff][(min(u, v) + lat_len) * vis_len + max(u, v)];
@@ -157,9 +164,8 @@ namespace semnan_cuda {
 
         public:
         __device__ __forceinline__ void set_covariance_grad(int32_t u, int32_t v, scalar_t val, int8_t buff) {
-            if (u >= 0 || v >= 0) {
+            if (u >= 0 || v >= 0)
                 covariance_grads[buff][(min(u, v) + lat_len) * vis_len + max(u, v)] = val;
-            }
         }
 
         public:
@@ -199,7 +205,12 @@ namespace semnan_cuda {
         }
 
         public:
-        __device__ __forceinline__ int32_t get_children_range(int32_t v, int32_t& begin, int32_t& end, const LayerData& layer) const {
+        /**
+         * @param v the node in layer `layer`
+         * @param begin the index of the first child is stored in it. Either -1 (the node parets itself) or 0 (otherwise)
+         * @param end the index after the last child. Number of children in the current layer (except for itself)
+         */
+        __device__ __forceinline__ void get_children_range(int32_t v, int32_t& begin, int32_t& end, const LayerData& layer) const {
             const int32_t idx = (v + lat_len) * num_layers + layer.idx;
             end = children_bases[idx + 1] - children_bases[idx];
 
@@ -212,6 +223,9 @@ namespace semnan_cuda {
         }
 
         public:
+        /**
+         * Get the `idx`-th child of `v` in layer `layer`; also get `v` if `idx == -1`.
+         */
         __device__ __forceinline__ int32_t get_child(int32_t v, int32_t idx, const LayerData& layer) const {
             if (idx == -1)
                 return v;
@@ -238,11 +252,6 @@ namespace semnan_cuda {
         __host__ __device__ __forceinline__ int32_t get_lat_len() const {
             return lat_len;
         }
-    //
-    //    public:
-    //    __host__ __device__ __forceinline__ int32_t get_all_len() const {
-    //        return lat_len + vis_len;
-    //    }
 
 #else
         public:
@@ -277,7 +286,7 @@ namespace semnan_cuda {
             },
             omegas{
                 omegas,
-                omegas ? omegas + ((lat_len + vis_len) * vis_len) : nullptr
+                omegas ? omegas + (lat_len * (lat_len + vis_len)) : nullptr
             },
             parents(parents),
             parents_bases(parents_bases),
@@ -290,9 +299,6 @@ namespace semnan_cuda {
             lat_len(lat_len),
             num_layers(num_layers)
         { }
-
-//        void set_w_accum(scalar_t* const value) { w_accum = value; }
-//        scalar_t* get_w_accum() const { return w_accum; }
 #endif
     };
 }
