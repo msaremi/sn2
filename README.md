@@ -13,5 +13,9 @@ python setup.py install
 
 ## Examples
 
-Find examples [here](examples).
+Examples:
+- [Introduction](examples/introduction.ipynb)
+- [Computation Method](examples/computation_method.ipynb)
+- [Custom Loss Function](examples/custom_loss.ipynb)
 
+Find more examples [here](examples).

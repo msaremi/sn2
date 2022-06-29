@@ -76,7 +76,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                           }
                  ), py::arg("structure"), py::arg("weights")=std::nullopt, py::arg("sample_covariance")=std::nullopt,
                  py::arg("dtype")=std::nullopt, py::arg("loss")=std::nullopt, py::arg("method")=std::nullopt,
-                 py::arg("validate")=std::nullopt, /* keep the user-defined loss function alive */ py::keep_alive<1, 5>())
+                 py::arg("validate")=std::nullopt, /* keep the user-defined loss function alive */ py::keep_alive<1, 6>())
             .def("forward", &SEMNANSolver::forward)
             .def("backward", &SEMNANSolver::backward)
             .def_property_readonly("omegas_", &SEMNANSolver::get_omegas)
