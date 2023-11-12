@@ -1,5 +1,9 @@
 # Memory-Efficient SEMNAN Solver CUDA Torch Extension
 
+## Reference
+
+Codes in article [https://arxiv.org/abs/2309.14073](https://arxiv.org/abs/2309.14073)
+
 ## Installation
 
 Installation requires the NVCC compiler with an ABI-compatible C++ compiler. 
