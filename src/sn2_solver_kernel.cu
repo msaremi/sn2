@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <utility>
 
-namespace semnan_cuda {
+namespace sn2_cuda {
     // A structure for holding a value and its index
     template <typename scalar_t>
     struct indexed_scalar_t {

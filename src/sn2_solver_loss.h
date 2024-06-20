@@ -1,14 +1,14 @@
-#ifndef SEMNAN_CUDA_LOSS_H
-#define SEMNAN_CUDA_LOSS_H
+#ifndef SN2_CUDA_LOSS_H
+#define SN2_CUDA_LOSS_H
 
 #include <torch/extension.h>
 #include "stringify.h"
 #include "declarations.h"
 
-namespace semnan_cuda::loss {
+namespace sn2_cuda::loss {
     // Custom loss method
     class LossBase {
-        friend class semnan_cuda::SEMNANSolver;
+        friend class sn2_cuda::SN2Solver;
 
         struct LossData {
             torch::Tensor sample_covariance_inv;

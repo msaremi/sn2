@@ -3,12 +3,12 @@
 #include <torch/extension.h>
 #include <stdio.h>
 
-namespace semnan_cuda {
+namespace sn2_cuda {
     /*
      * A declaration for the cpp compiler and a definition for the nvcc compiler.
      */
 
-    // Stores the structural data for a layer in semnan
+    // Stores the structural data for a layer in sn2
     class LayerData {
         public:
         int32_t idx;

@@ -1,8 +1,8 @@
 #include <torch/extension.h>
-#include "semnan_solver.h"
+#include "sn2_solver.h"
 
-using namespace semnan_cuda;
-using namespace semnan_cuda::loss;
+using namespace sn2_cuda;
+using namespace sn2_cuda::loss;
 
 
 class PubLossBase : public LossBase {
@@ -54,43 +54,43 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::class_<Bhattacharyya, LossBase, std::shared_ptr<Bhattacharyya>>(loss, "Bhattacharyya")
             .def(py::init<>());
 
-    auto semnan_solver = py::class_<SEMNANSolver>(m, "SEMNANSolver")
+    auto sn2_solver = py::class_<SN2Solver>(m, "SN2Solver")
             .def(py::init([] (
                                   torch::Tensor& structure,
                                   std::optional<torch::Tensor> parameters,
                                   std::optional<torch::Tensor> sample_covariance,
                                   std::optional<py::object> dtype,
                                   std::optional<std::shared_ptr<LossBase>> loss_function,
-                                  std::optional<SEMNANSolver::METHODS> method,
+                                  std::optional<SN2Solver::METHODS> method,
                                   std::optional<bool> validate
                           ) {
-                              return SEMNANSolver(
+                              return SN2Solver(
                                       structure,
                                       std::move(parameters),
                                       std::move(sample_covariance),
                                       dtype.has_value() ? torch::python::detail::py_object_to_dtype(dtype.value()) : torch::kFloat,
                                       loss_function.has_value() ? loss_function.value() : nullptr,
-                                      method.has_value() ? method.value() : SEMNANSolver::METHODS::COVAR,
+                                      method.has_value() ? method.value() : SN2Solver::METHODS::COVAR,
                                       !validate.has_value() || validate.value()
                               );
                           }
                  ), py::arg("structure"), py::arg("weights")=std::nullopt, py::arg("sample_covariance")=std::nullopt,
                  py::arg("dtype")=std::nullopt, py::arg("loss")=std::nullopt, py::arg("method")=std::nullopt,
                  py::arg("validate")=std::nullopt, /* keep the user-defined loss function alive */ py::keep_alive<1, 6>())
-            .def("forward", &SEMNANSolver::forward)
-            .def("backward", &SEMNANSolver::backward)
-            .def_property_readonly("omegas_", &SEMNANSolver::get_omegas)
-            .def_property_readonly("lambda_", &SEMNANSolver::get_lambda)
-            .def_property_readonly("covariance_", &SEMNANSolver::get_covariance)
-            .def_property_readonly("lv_transformation_", &SEMNANSolver::get_lv_transformation)
-            .def_property_readonly("visible_covariance_", &SEMNANSolver::get_visible_covariance)
-            .def_property("weights", &SEMNANSolver::get_weights, &SEMNANSolver::set_weights)
-            .def_property("sample_covariance", &SEMNANSolver::get_sample_covariance, &SEMNANSolver::set_sample_covariance)
-            .def("loss", &SEMNANSolver::loss)
-            .def("loss_proxy", &SEMNANSolver::loss_proxy);
+            .def("forward", &SN2Solver::forward)
+            .def("backward", &SN2Solver::backward)
+            .def_property_readonly("omegas_", &SN2Solver::get_omegas)
+            .def_property_readonly("lambda_", &SN2Solver::get_lambda)
+            .def_property_readonly("covariance_", &SN2Solver::get_covariance)
+            .def_property_readonly("lv_transformation_", &SN2Solver::get_lv_transformation)
+            .def_property_readonly("visible_covariance_", &SN2Solver::get_visible_covariance)
+            .def_property("weights", &SN2Solver::get_weights, &SN2Solver::set_weights)
+            .def_property("sample_covariance", &SN2Solver::get_sample_covariance, &SN2Solver::set_sample_covariance)
+            .def("loss", &SN2Solver::loss)
+            .def("loss_proxy", &SN2Solver::loss_proxy);
 
-    py::enum_<SEMNANSolver::METHODS>(semnan_solver, "METHODS")
-            .value("COVAR", SEMNANSolver::METHODS::COVAR)
-            .value("ACCUM", SEMNANSolver::METHODS::ACCUM)
+    py::enum_<SN2Solver::METHODS>(sn2_solver, "METHODS")
+            .value("COVAR", SN2Solver::METHODS::COVAR)
+            .value("ACCUM", SN2Solver::METHODS::ACCUM)
             .export_values();
 }

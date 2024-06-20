@@ -1,11 +1,11 @@
-#ifndef SEMNAN_SOLVER_H
-#define SEMNAN_SOLVER_H
+#ifndef SN2_SOLVER_H
+#define SN2_SOLVER_H
 
 #include <torch/extension.h>
 #include "stringify.h"
 #include "device_data.h"
 #include "declarations.h"
-#include "semnan_solver_loss.h"
+#include "sn2_solver_loss.h"
 #include <stddef.h>
 #include <vector>
 #include <set>
@@ -14,9 +14,9 @@
 #include <optional>
 #include <utility>
 
-namespace semnan_cuda {
+namespace sn2_cuda {
     using namespace torch::indexing;
-    using namespace semnan_cuda::loss;
+    using namespace sn2_cuda::loss;
 
     // Declarations
     namespace covar {
@@ -50,8 +50,8 @@ namespace semnan_cuda {
     extern template class DeviceData<float>;
     extern template class DeviceData<double>;
 
-    // Class SEMNANSolver
-    class SEMNANSolver {
+    // Class SN2Solver
+    class SN2Solver {
         public:
         enum struct METHODS {
             COVAR = 0,
@@ -59,12 +59,12 @@ namespace semnan_cuda {
         };
 
         private:
-        torch::Tensor structure;                // We keep all the tensors alive for the lifetime of SEMNANSolver
+        torch::Tensor structure;                // We keep all the tensors alive for the lifetime of SN2Solver
         torch::Tensor lambda;
         torch::Tensor weights;
         torch::Tensor covariance;
         torch::Tensor visible_covariance;
-        torch::Tensor parents;                  // Information regarding the SEMNAN structure
+        torch::Tensor parents;                  // Information regarding the SN2 structure
         torch::Tensor parents_bases;            // ^
         torch::Tensor children;                 // ^
         torch::Tensor children_bases;           // ^
@@ -86,8 +86,8 @@ namespace semnan_cuda {
         torch::Dtype dtype;
         bool validate;
         METHODS method;
-        void (SEMNANSolver::*forward_method)(void);
-        void (SEMNANSolver::*backward_method)(void);
+        void (SN2Solver::*forward_method)(void);
+        void (SN2Solver::*backward_method)(void);
 
         std::shared_ptr<LossBase> loss_function;
 
@@ -113,7 +113,7 @@ namespace semnan_cuda {
             this->method = method;
             this->validate = validate;
 
-            TORCH_CHECK(torch::cuda::is_available(), "CUDA is not available. " STRINGIFY(SEMNANSolver) " needs CUDA to run.")
+            TORCH_CHECK(torch::cuda::is_available(), "CUDA is not available. " STRINGIFY(SN2Solver) " needs CUDA to run.")
             TORCH_CHECK(structure.dim() == 2, STRINGIFY(structure) " must be 2-dimensional; it is ", structure.dim(), "-dimensional.")
             TORCH_CHECK(structure.numel() > 0, STRINGIFY(structure) " needs at least one element.")
             TORCH_CHECK(latent_size >= 0, STRINGIFY(structure) " must be a vertical-rectangular matrix.")
@@ -166,8 +166,8 @@ namespace semnan_cuda {
                     this->visible_covariance = this->covariance.index({ Slice(latent_size, None), Slice() });
                     this->visible_covariance.mutable_grad() = this->covariance.mutable_grad().index({ Slice(), Slice(latent_size, None), Slice() });
 
-                    this->forward_method = &SEMNANSolver::forward_covar;
-                    this->backward_method = &SEMNANSolver::backward_covar;
+                    this->forward_method = &SN2Solver::forward_covar;
+                    this->backward_method = &SN2Solver::backward_covar;
                     break;
 
                 case METHODS::ACCUM:
@@ -176,8 +176,8 @@ namespace semnan_cuda {
                     this->weights_accum = torch::zeros({latent_size, visible_size}, options);
                     this->omegas = torch::zeros({2, latent_size, total_size}, options);
 
-                    this->forward_method = &SEMNANSolver::forward_accum;
-                    this->backward_method = &SEMNANSolver::backward_accum;
+                    this->forward_method = &SN2Solver::forward_accum;
+                    this->backward_method = &SN2Solver::backward_accum;
                     break;
             }
         }
@@ -328,7 +328,7 @@ namespace semnan_cuda {
 
         public:
         /**
-         * SEMNANSolver constructor.
+         * SN2Solver constructor.
          * @param structure a vertical matrix of `bool` values indicating the structure of the AMASEM
          * @param parameters the initial parameters of the AMASEM
          * @param dtype the type of matrices used for calculations: `torch::kFloat` or `torch::kDouble`
@@ -336,7 +336,7 @@ namespace semnan_cuda {
          * @param method The method used for calculating the derivatives
          * @param validate Apply extra validations; set `false` to avoid unneccesary calculations
          */
-        SEMNANSolver(
+        SN2Solver(
                 torch::Tensor structure,
                 std::optional<torch::Tensor> parameters = std::nullopt,
                 std::optional<torch::Tensor> sample_covariance = std::nullopt,
@@ -391,7 +391,7 @@ namespace semnan_cuda {
         torch::Tensor get_lv_transformation() {
             TORCH_CHECK(this->method == METHODS::ACCUM,
                         STRINGIFY(weights_accum) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::COVAR)
-                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(METHODS::ACCUM) ".")
+                        ". Consider initializing " STRINGIFY(SN2Solver) " with " STRINGIFY(METHODS::ACCUM) ".")
             return this->weights_accum;
         }
 
@@ -413,7 +413,7 @@ namespace semnan_cuda {
 
         private:
         void forward_accum() {
-            AT_DISPATCH_FLOATING_TYPES(dtype, "SEMNANSolver::forward_accum", ([&] {
+            AT_DISPATCH_FLOATING_TYPES(dtype, "SN2Solver::forward_accum", ([&] {
                 accum::forward<scalar_t>(this->layers_vec, std::get<DeviceData<scalar_t>>(this->data));
                 torch::matmul_out(visible_covariance, torch::transpose(weights_accum, 0, 1), weights_accum);
             }));
@@ -421,7 +421,7 @@ namespace semnan_cuda {
 
         private:
         void forward_covar() {
-            AT_DISPATCH_FLOATING_TYPES(dtype, "SEMNANSolver::forward_covar", ([&] {
+            AT_DISPATCH_FLOATING_TYPES(dtype, "SN2Solver::forward_covar", ([&] {
                 covar::forward<scalar_t>(this->layers_vec, std::get<DeviceData<scalar_t>>(this->data));
             }));
         }
@@ -435,14 +435,14 @@ namespace semnan_cuda {
         void backward_accum() {
             torch::Tensor&& output_omega = get_output_omega();
             torch::matmul_out(output_omega, weights_accum, get_output_covariance_grad());
-            AT_DISPATCH_FLOATING_TYPES(dtype, "SEMNANSolver::backward_accum", ([&] {
+            AT_DISPATCH_FLOATING_TYPES(dtype, "SN2Solver::backward_accum", ([&] {
                 accum::backward<scalar_t>(this->layers_vec, std::get<DeviceData<scalar_t>>(this->data));
             }));
         }
 
         private:
         void backward_covar() {
-            AT_DISPATCH_FLOATING_TYPES(dtype, "SEMNANSolver::backward_covar", ([&] {
+            AT_DISPATCH_FLOATING_TYPES(dtype, "SN2Solver::backward_covar", ([&] {
                 covar::backward<scalar_t>(this->layers_vec, std::get<DeviceData<scalar_t>>(this->data));
             }));
         }
@@ -467,7 +467,7 @@ namespace semnan_cuda {
         torch::Tensor& get_covariance() {
             TORCH_CHECK(this->method == METHODS::COVAR,
                         STRINGIFY(covariance) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::ACCUM)
-                        ". Consider using " STRINGIFY(visible_covariance) " or initializing " STRINGIFY(SEMNANSolver)
+                        ". Consider using " STRINGIFY(visible_covariance) " or initializing " STRINGIFY(SN2Solver)
                         " with " STRINGIFY(method=METHODS::COVAR) ".")
             return this->covariance;
         }
@@ -481,7 +481,7 @@ namespace semnan_cuda {
         torch::Tensor& get_lambda() {
             TORCH_CHECK(this->method == METHODS::COVAR,
                         STRINGIFY(lambda) " is not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::ACCUM)
-                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(method=METHODS::COVAR) ".")
+                        ". Consider initializing " STRINGIFY(SN2Solver) " with " STRINGIFY(method=METHODS::COVAR) ".")
             return this->lambda;
         }
 
@@ -489,7 +489,7 @@ namespace semnan_cuda {
         torch::Tensor& get_omegas() {
             TORCH_CHECK(this->method == METHODS::ACCUM,
                         STRINGIFY(omegas) " are not computed when " STRINGIFY(method) " is set to " STRINGIFY(METHODS::COVAR)
-                        ". Consider initializing " STRINGIFY(SEMNANSolver) " with " STRINGIFY(method=METHODS::ACCUM) ".")
+                        ". Consider initializing " STRINGIFY(SN2Solver) " with " STRINGIFY(method=METHODS::ACCUM) ".")
             return this->omegas;
         }
     };

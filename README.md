@@ -1,8 +1,8 @@
-# Memory-Efficient SEMNAN Solver CUDA Torch Extension
+# Structural System Neural Network (SN²) Solver CUDA Torch Extension
 
 ## Reference
 
-Codes in article [https://arxiv.org/abs/2309.14073](https://arxiv.org/abs/2309.14073)
+Codes of the article [A Causal-Neural Architecture: Parameter-optimization of Pre-marginalized DAGs](https://arxiv.org/abs/2309.14073)
 
 ## Installation
 
@@ -11,7 +11,7 @@ A pre-compiled egg is available [here](dist).
 
 To intall, use:
 ```shell
-cd u-semnan
+cd sn2
 python setup.py install
 ```
 
