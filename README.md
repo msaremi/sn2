@@ -2,7 +2,7 @@
 
 ## Reference
 
-Codes of the article [A Causal-Neural Architecture: Parameter-optimization of Pre-marginalized DAGs](https://arxiv.org/abs/2309.14073)
+Codes of the article [Neural Network Parameter-optimization of Gaussian pmDAGs](https://arxiv.org/abs/2309.14073)
 
 ## Installation
 
