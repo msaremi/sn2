@@ -82,7 +82,7 @@ def _generate_results(num_expr=10, max_iterations=12000, dir="."):
 
     results = get_results(data, num_expr, max_iterations)
 
-    with open(Path(dir, 'results.json'), 'w') as fp:
+    with open(Path(dir, 'identifiability_results.json'), 'w') as fp:
         json.dump(results, fp)
 
 

@@ -7,7 +7,7 @@ Codes of the article [Neural Network Parameter-optimization of Gaussian pmDAGs](
 ## Installation
 
 Installation requires the NVCC compiler with an ABI-compatible C++ compiler. 
-A pre-compiled egg is available [here](dist).
+A pre-compiled Python 3.9 Windows egg is available [here](dist).
 
 To intall, use:
 ```shell
