@@ -2,8 +2,13 @@
 #define SN2_CUDA_LOSS_H
 
 #include <torch/extension.h>
+#include <tuple>
 #include "stringify.h"
 #include "declarations.h"
+
+inline torch::Tensor inverse_ex(const torch::Tensor& x) {
+    return std::get<0>(at::linalg_inv_ex(x));
+}
 
 namespace sn2_cuda::loss {
     // Custom loss method
@@ -76,7 +81,7 @@ namespace sn2_cuda::loss {
         protected:
         const torch::Tensor& get_sample_covariance_inv() const {
             if (!this->loss_data->sample_covariance_inv.defined())
-                this->loss_data->sample_covariance_inv = torch::inverse(this->sample_covariance);
+                this->loss_data->sample_covariance_inv = inverse_ex(this->sample_covariance);
 
             return this->loss_data->sample_covariance_inv;
         }
@@ -126,7 +131,7 @@ namespace sn2_cuda::loss {
         protected:
         virtual void loss_backward(const torch::Tensor& visible_covariance, torch::Tensor& visible_covariance_grad) const {
             visible_covariance_grad.copy_(get_sample_covariance_inv());
-            visible_covariance_grad.subtract_(torch::inverse(visible_covariance));
+            visible_covariance_grad.subtract_(inverse_ex(visible_covariance));
         }
     };
 
@@ -152,8 +157,40 @@ namespace sn2_cuda::loss {
 
         protected:
         virtual void loss_backward(const torch::Tensor& visible_covariance, torch::Tensor& visible_covariance_grad) const {
-            visible_covariance_grad.copy_(torch::inverse(torch::add(get_sample_covariance(), visible_covariance)));
-            visible_covariance_grad.subtract_(torch::div(torch::inverse(visible_covariance), 2.0));
+            visible_covariance_grad.copy_(inverse_ex(torch::add(get_sample_covariance(), visible_covariance)));
+            visible_covariance_grad.subtract_(torch::div(inverse_ex(visible_covariance), 2.0));
+            visible_covariance_grad.transpose_(0, 1);
+        }
+    };
+
+
+    class SquaredHellinger : public LossBase {
+        protected:
+        virtual torch::Tensor loss_proxy(const torch::Tensor& visible_covariance) const {
+            return torch::neg(
+                torch::div(
+                    torch::pow(torch::det(visible_covariance), 1.0/4.0),
+                    torch::sqrt(torch::det(
+                        torch::div(torch::add(visible_covariance, get_sample_covariance()), 2.0)
+                    ))
+                )
+            );
+        }
+
+        protected:
+        virtual torch::Tensor loss(const torch::Tensor& visible_covariance) const {
+            return torch::add(torch::mul(
+                loss_proxy(visible_covariance), torch::pow(torch::det(get_sample_covariance()), 1.0/4.0)
+            ), 1.0);
+        }
+
+        protected:
+        virtual void loss_backward(const torch::Tensor& visible_covariance, torch::Tensor& visible_covariance_grad) const {
+            visible_covariance_grad.copy_(inverse_ex(visible_covariance));
+            visible_covariance_grad.mul_(torch::subtract(torch::det(visible_covariance), torch::det(get_sample_covariance())));
+            visible_covariance_grad.div_(torch::pow(torch::add(torch::det(visible_covariance), torch::det(get_sample_covariance())), 3.0/2.0));
+            visible_covariance_grad.mul_(torch::pow(torch::det(get_sample_covariance()), 1.0/4.0));
+            visible_covariance_grad.mul_(torch::pow(torch::det(visible_covariance), 1.0/4.0));
             visible_covariance_grad.transpose_(0, 1);
         }
     };

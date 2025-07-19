@@ -25,7 +25,7 @@ class ExtendedBuildExtension(BuildExtension):
 
 setup(
     name='sn2_cuda',
-    version='0.9.0',
+    version='0.9.1',
     ext_modules=[
         CUDAExtension('sn2_cuda', [
             'src/sn2_cuda.cpp',

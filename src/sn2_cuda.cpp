@@ -54,6 +54,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::class_<Bhattacharyya, LossBase, std::shared_ptr<Bhattacharyya>>(loss, "Bhattacharyya")
             .def(py::init<>());
 
+    py::class_<SquaredHellinger, LossBase, std::shared_ptr<SquaredHellinger>>(loss, "SquaredHellinger")
+            .def(py::init<>());
+
     auto sn2_solver = py::class_<SN2Solver>(m, "SN2Solver")
             .def(py::init([] (
                                   torch::Tensor& structure,
