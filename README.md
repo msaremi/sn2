@@ -6,14 +6,26 @@ Codes of the article [Neural Network Parameter-optimization of Gaussian pmDAGs](
 
 ## Installation
 
-Installation requires the NVCC compiler with an ABI-compatible C++ compiler. 
-A pre-compiled Python 3.9 Windows egg is available [here](dist).
+### Installation from pre-compiled .egg
+Pre-compiled Python 3.9 and Python 3.12 Windows eggs are available [here](dist). You can install them using the following commands:
+```shell
+cd sn2/dist
+wheel convert <egg file name>
+pip3 install <created .whl file>
+```
+In place of `<egg file name>` the name of the .egg file should be written. It creates a .whl file, which is used in place of `<created .whl file>`.
 
-To intall, use:
+### Installation from source
+
+Installation requires the NVCC compiler with an ABI-compatible C++ compiler. 
+On Windows, you will probably need to install [MSVC++](https://visualstudio.microsoft.com/downloads) and [the CUDA toolkit](https://developer.nvidia.com/cuda-toolkit-archive) in addition to a GPU-enabled [PyTorch](https://pytorch.org) package.
+
+To install from source, first move to the package directory. Then, use the `pip3` command to install it:
 ```shell
 cd sn2
-python setup.py install
+pip3 install .
 ```
+Alternatively, you may run `python setup.py install` to manually install the package.
 
 ## Examples
 
